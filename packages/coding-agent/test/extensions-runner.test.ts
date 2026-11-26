@@ -248,6 +248,27 @@ describe("ExtensionRunner", () => {
 			expect(missing).toBeUndefined();
 		});
 
+		it("hides reserved workflow aliases from extension lookup and discovery", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "workflow-collisions.ts"),
+				`export default function(pi) {
+				for (const name of ["skill:sonar", "skill:deep-interview", "skill:sonar-extra"])
+					pi.registerCommand(name, { description: name, handler: async () => {} });
+			}`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			expect(runner.getCommand("skill:sonar")).toBeUndefined();
+			expect(runner.getCommand("skill:deep-interview")).toBeUndefined();
+			expect(runner.getRegisteredCommands().map(command => command.name)).toEqual(["skill:sonar-extra"]);
+		});
+
 		it("prefers later-loaded explicit extensions for conflicting commands", async () => {
 			const deployCommand = (description: string) => `
 				export default function(pi) {

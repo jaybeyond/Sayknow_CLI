@@ -24,6 +24,11 @@ export const en = {
 	"welcome.pickActive": "↑↓ move · ⏎ open · esc back",
 	"welcome.sessions": "sessions",
 	"welcome.chooseModel": "choose a model",
+	"fallback.reason.quota": "Usage limit reached",
+	"fallback.reason.auth": "Authentication failed",
+	"fallback.reason.resolution": "Previous model unavailable",
+	"fallback.reason.newTurn": "Retrying model selection",
+	"fallback.reason.other": "Model fallback",
 
 	// ── Composer and settings chrome ──
 	"composer.placeholder": "Type your message",
@@ -32,6 +37,8 @@ export const en = {
 	"composer.steer": "Steer",
 	"composer.queue": "Queue",
 	"composer.newLine": "New line",
+	"tools.expandHint": "Expand",
+	"update.available": "Update {version} available",
 	"settings.title": "Settings",
 	"settings.preview": "Preview:",
 	"settings.tabCycle": "Tab to switch",

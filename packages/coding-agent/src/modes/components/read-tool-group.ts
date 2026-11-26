@@ -279,7 +279,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	/**
 	 * Add a code-cell content preview below the entry summary.
-	 * When collapsed: shows first COLLAPSED_PREVIEW_LINES lines with "… N more lines (Ctrl+O for more)" hint.
+	 * When collapsed: shows the first COLLAPSED_PREVIEW_LINES lines and the remaining line count.
 	 * When expanded: shows full content.
 	 */
 	#addContentPreview(entry: ReadEntry): void {

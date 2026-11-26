@@ -173,7 +173,7 @@ export async function routeNativePrompt(input: NativePromptRoutingInput): Promis
 		}
 		return {
 			skillState,
-			uiSkillContext: seen.result?.uiSkill ? buildUiSkillDirectiveForSkill(seen.result.uiSkill) : null,
+			uiSkillContext: seen.result?.uiSkill ? buildUiSkillDirectiveForSkill(seen.result.uiSkill, input.text) : null,
 		};
 	} finally {
 		opened?.close();

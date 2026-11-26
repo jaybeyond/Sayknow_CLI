@@ -7,9 +7,9 @@ Internal Ultragoal sub-skill fragment (`kind: "skill-fragment"`, parent skill `u
 Use the lifecycle commands exactly when runtime metadata proves safety:
 
 ```sh
-skc ultragoal start-pipeline-overlap --prior-goal-id G001 --next-goal-id G002 --review-handles-json '<json>' --qa-handles-json '<json>' --implementation-handle-json '<json>' --json
-skc ultragoal join-pipeline-overlap --overlap-id <id> --review-result-json '<json>' --qa-result-json '<json>' --json
-skc ultragoal rebaseline-pipeline-overlap --overlap-id <id> --goal-id G002 --evidence "<evidence>" --target-state-json '<json>' --json
+skc voyage start-pipeline-overlap --prior-goal-id G001 --next-goal-id G002 --review-handles-json '<json>' --qa-handles-json '<json>' --implementation-handle-json '<json>' --json
+skc voyage join-pipeline-overlap --overlap-id <id> --review-result-json '<json>' --qa-result-json '<json>' --json
+skc voyage rebaseline-pipeline-overlap --overlap-id <id> --goal-id G002 --evidence "<evidence>" --target-state-json '<json>' --json
 ```
 
 Runtime-backed pipelining is deliberately narrow:
@@ -23,8 +23,8 @@ Runtime-backed pipelining is deliberately narrow:
 
 ## Validation-batch checkpoint contract
 
-- **Non-final members** checkpoint `complete` with a single top-level `deferredToBatch` quality gate (kind `validation-batch-deferred`): targeted verification, ai-slop-cleaner pass, and a rerun iteration, plus a cumulative-since-base change set. A `deferredToBatch` gate must NOT contain `architectReview`, `executorQa`, or `validationBatchClose` — deferring never manufactures fake review approvals.
-- **The final member** (`finalGoalId`) checkpoints `complete` with the normal full strict gate PLUS a top-level `validationBatchClose` proof that covers all member IDs, member metadata hashes, member receipt/checkpoint-ledger-event IDs, per-member change-set hashes, and union change-set coverage. The final close only starts once every non-final member is already `complete` with a structurally fresh deferred receipt (out-of-order close is rejected).
+- **Non-final members** checkpoint `complete` with a single top-level `batchDeferred` quality gate (kind `batch-deferred`): targeted verification, cleanup pass, and a rerun iteration, plus a cumulative-since-base change set. A `batchDeferred` gate must NOT contain `review`, `verify`, or `batchClose` — deferring never manufactures fake review approvals.
+- **The final member** (`finalGoalId`) checkpoints `complete` with the normal full strict gate PLUS a top-level `batchClose` proof that covers all member IDs, member metadata hashes, member receipt/checkpoint-ledger-event IDs, per-member change-set hashes, and union change-set coverage. The final close only starts once every non-final member is already `complete` with a structurally fresh deferred receipt (out-of-order close is rejected).
 - Close state is append-only proof: it lives in the final member's checkpoint receipt and matching `goal_checkpointed` ledger row only. Never stamp `closedReceiptId`/`closedAt` or any close-state field onto member goals, and never append a separate close ledger event.
 - Change sets are cumulative-since-base: each member's `changeSet.paths` is the whole-worktree diff vs base (`cumulativeFromBase: true`), `memberGoalId` is a label not a per-path attribution, and `unionChangeSet.paths` carries no per-goal attribution.
 - Batch invalidation is fail-closed: steering mutations that would invalidate a batch are rejected while any member holds a fresh deferred receipt.

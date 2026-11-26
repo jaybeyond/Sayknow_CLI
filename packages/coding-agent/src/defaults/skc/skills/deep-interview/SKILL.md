@@ -1,6 +1,6 @@
 ---
 name: deep-interview
-description: Socratic deep interview with mathematical ambiguity gating before explicit execution approval
+description: Sonar requirements interview with ambiguity gating before explicit execution approval
 argument-hint: "[--quick|--standard|--deep] <idea or vague description>"
 pipeline: [deep-interview, plan]
 handoff-policy: approval-required
@@ -55,17 +55,18 @@ Inspired by the [Ouroboros project](https://github.com/Q00/ouroboros) which demo
 - Persist interview state for resume across session interruptions
 - A multi-persona lateral-review panel convenes at ambiguity-milestone transitions (and before synthesizing any agent-supplied answer) to expose blind spots from independent perspectives
 - Refine free-text answers into a structured interpretation and confirm nothing is lost before scoring
-- After 3 consecutive agent-resolved answers (accepted auto-research candidates or auto-answers), route the next question to the user (dialectic rhythm guard)
+- After 3 consecutive agent-resolved answers (accepted research candidates or autofills), route the next question to the user (dialectic rhythm guard)
 - Run an independent closure audit and a one-sentence goal restatement, each requiring explicit user confirmation, before crystallizing the spec
 </Execution_Policy>
 
 <Internal_Auto_Mode_Protocol>
-- `auto-research-greenfield.md`, `auto-answer-uncertain.md`, and `lateral-review-panel.md` are internal prompt fragments loaded on demand with bundle metadata `kind: "skill-fragment"`; they are not public skills, are never slash-command/discoverable, and must not be registered through any `skill://` route.
+- `research.md`, `autofill.md`, and `panel.md` are internal prompt fragments loaded on demand with bundle metadata `kind: "skill-fragment"`; they are not public skills, are never slash-command/discoverable, and must not be registered through any `skill://` route.
+- Stored state keeps older keys for this release: `research_rounds` = `auto_researched_rounds`, `autofill_rounds` = `auto_answered_rounds`, `autofill_streak` = `auto_answer_streak`, `panel_reviews` = `lateral_reviews`, and `panel_failures` = `lateral_panel_failures`. Read either spelling, write the new name, and never send both.
 - Load fragments only for the specific hook that needs them, with forked inherited context kept read-only and prompt-budgeted; summarize active interview context before spawning the architect if the payload is large.
 - Auto-mode architects are read-only: no code edits, no `.skc/` mutation, no workflow chaining, no formatters, and no execution delegation.
 - Validate every fragment response before using it: required sections must be present, candidates/answer must match the requested shape, rationale must cite available context, confidence must be explicit, and insufficient-context fallbacks must be honored.
 - If architect spawn, fragment loading, or response validation fails, continue the normal manual interview path silently and record an internal audit note in state by incrementing `architect_failures`; do not expose tool noise to the user unless it changes the next user-facing question.
-- Track `auto_researched_rounds`, `auto_answered_rounds`, `lateral_reviews`, `auto_answer_streak`, `refined_rounds`, `architect_failures`, and `lateral_panel_failures` in state and final spec metadata.
+- Track `research_rounds`, `autofill_rounds`, `panel_reviews`, `autofill_streak`, `refined_rounds`, `architect_failures`, and `panel_failures` in state and final spec metadata.
 </Internal_Auto_Mode_Protocol>
 
 
@@ -74,7 +75,7 @@ Inspired by the [Ouroboros project](https://github.com/Q00/ouroboros) which demo
 
 ## Native Plugin Invocation Guard (Issue #3030)
 
-If this raw bundled skill is loaded by SKC's native skill loader through `/skill:deep-interview`, do not treat that path as permission to skip rendered SKC setup. The user-facing invocation is `/skill:deep-interview`; do not recommend or advertise CLI bridge commands as the deep-interview entrypoint. Regardless of invocation path, Phase 0 below remains blocking and must resolve `skc.deepInterview.ambiguityThreshold` from settings before any announcement, state write, question, or ambiguity score.
+If this raw bundled skill is loaded through `/skill:sonar` (or its legacy alias `/skill:deep-interview`), do not skip rendered SKC setup. Recommend `/skill:sonar` for an interactive interview, not the CLI bridge commands. Phase 0 must resolve `skc.deepInterview.ambiguityThreshold` before any announcement, state write, question, or ambiguity score.
 
 ## Corrupt current-session state recovery
 
@@ -198,11 +199,11 @@ Run this phase only when the active deep-interview state or invocation indicates
       "last_targeted_component_id": null
     },
     "ontology_snapshots": [],
-    "auto_researched_rounds": [],
-    "auto_answered_rounds": [],
-    "lateral_reviews": [],
-    "lateral_panel_failures": 0,
-    "auto_answer_streak": 0,
+    "research_rounds": [],
+    "autofill_rounds": [],
+    "panel_reviews": [],
+    "panel_failures": 0,
+    "autofill_streak": 0,
     "refined_rounds": [],
     "closure_overrides": [],
     "restated_goal": null,
@@ -321,7 +322,7 @@ If any prompt input is too large, summarize it first and then continue from the 
 - Questions should expose ASSUMPTIONS, not gather feature lists
 - **Facts vs decisions:** answer factual questions (current stack, versions, existing patterns, external API limits) from explore/research and present them as cited confirmations; route every *decision* (goals, scope, tradeoffs, desired behavior for new work) to the user. When unsure which a question is, treat it as a decision and ask.
 - If the scope is still conceptually fuzzy (entities keep shifting, the user is naming symptoms, or the core noun is unstable), switch to an ontology-style question that asks what the thing fundamentally IS before returning to feature/detail questions
-- **Dialectic rhythm guard:** increment `state.auto_answer_streak` when a round is resolved without direct user judgment (an accepted auto-research candidate or an auto-answer); reset it to 0 on any direct, refined, or cited-confirmation answer from the user. If the streak reaches 3, route the next question directly to the user even if it looks auto-answerable, then reset. The interview is with the human, not the codebase.
+- **Dialectic rhythm guard:** increment `state.autofill_streak` when a round is resolved without direct user judgment (an accepted research candidate or an autofill); reset it to 0 on any direct, refined, or cited-confirmation answer from the user. If the streak reaches 3, route the next question directly to the user even if it looks autofillable, then reset. The interview is with the human, not the codebase.
 
 **Question styles by dimension:**
 | Dimension | Question Style | Example |
@@ -343,14 +344,14 @@ GUESS: {your hypothesis} — {why you hold it}. If it is {the other reading} ins
 
 - Reacting is cheaper than generating: a terse "no, the second one" still carries a full correction, so low-effort answers stop being low-information rounds.
 - A visible guess is falsifiable. Being wrong out loud is the point; guess in the direction you expect pushback when the reading is genuinely contested.
-- A guess is NOT an auto-answer. It never resolves the round, never feeds scoring, and never increments `auto_answer_streak` — only the user's answer does.
+- A guess is NOT an autofill. It never resolves the round, never feeds scoring, and never increments `autofill_streak` — only the user's answer does.
 - Skip only when a guess would be pure noise: Round 0 topology confirmation, the Phase 4b restate gate, and clarification re-asks.
 
-### Step 2a′: Auto-Research Greenfield Questions
+### Step 2a′: Research Greenfield Questions
 
-When the next question is for a greenfield interview and is tagged `research: true`, load `auto-research-greenfield.md` as an internal `kind: "skill-fragment"` prompt for a fork-context architect before Step 2b. Pass only the tagged question, locked topology summary, prompt-safe initial idea, trimmed prior decisions/gaps, and relevant constraints. The architect must return 2-3 ranked candidates with rationale, confidence, and fallback notes. Validate the shape before use; if valid, incorporate the candidates as concise answer options or context for the single user-facing question and append the round number to `auto_researched_rounds`. If invalid or unavailable, fall back silently to the normal generated question and increment `architect_failures`.
+When the next question is for a greenfield interview and is tagged `research: true`, load `research.md` as an internal `kind: "skill-fragment"` prompt for a fork-context architect before Step 2b. Pass only the tagged question, locked topology summary, prompt-safe initial idea, trimmed prior decisions/gaps, and relevant constraints. The architect must return 2-3 ranked candidates with rationale, confidence, and fallback notes. Validate the shape before use; if valid, incorporate the candidates as concise answer options or context for the single user-facing question and append the round number to `research_rounds`. If invalid or unavailable, fall back silently to the normal generated question and increment `architect_failures`.
 
-Auto-research must never add a public skill entrypoint, never be slash-command/discoverable, never register a `skill://` handler, and never alter the one-question-per-round rule.
+Research must never add a public skill entrypoint, never be slash-command/discoverable, never register a `skill://` handler, and never alter the one-question-per-round rule.
 
 ### Step 2b: Ask the Question
 
@@ -365,11 +366,11 @@ GUESS: {your hypothesis} — {why you hold it}. If it is {the other reading} ins
 
 Options should include contextually relevant choices plus free-text, translated/localized according to `language.instruction` when present.
 
-**Standing early-exit option (every interview round, from round 1).** Every interview-round `ask` (Step 2b questions for round ≥ 1, including Phase 4a closure follow-ups) MUST list, as its final option, `This is enough, stop at current ambiguity ({score}%)`, where `{score}` is exactly the ambiguity shown on the Round line and in `deepInterview.ambiguity`. Offer it regardless of the ambiguity score or round number — above the threshold, at it, or below it — and never mark it as the recommended option. Localize the label per `language.instruction` while keeping the numeric percentage unchanged. It is not offered on the Round 0 topology gate, the Phase 4b Restate gate, the auto-answer threshold-crossing confirmation, or the Phase 5 execution gate; a `clarificationQuestion` re-ask repeats the original options, so it keeps the option. The Ask UI still adds its own free-text control; never imitate that control with this option.
+**Standing early-exit option (every interview round, from round 1).** Every interview-round `ask` (Step 2b questions for round ≥ 1, including Phase 4a closure follow-ups) MUST list, as its final option, `This is enough, stop at current ambiguity ({score}%)`, where `{score}` is exactly the ambiguity shown on the Round line and in `deepInterview.ambiguity`. Offer it regardless of the ambiguity score or round number — above the threshold, at it, or below it — and never mark it as the recommended option. Localize the label per `language.instruction` while keeping the numeric percentage unchanged. It is not offered on the Round 0 topology gate, the Phase 4b Restate gate, the autofill threshold-crossing confirmation, or the Phase 5 execution gate; a `clarificationQuestion` re-ask repeats the original options, so it keeps the option. The Ask UI still adds its own free-text control; never imitate that control with this option.
 
 Selecting the standing option is an explicit **early proceed** (see Step 2f), not a round answer and not a hard cancellation:
 
-1. Do not run Step 2b′ auto-answer, Step 2b″ refine, Step 2c scoring, Step 2d progress, or Step 2e `record-round` enrichment for that selection; the runtime's `answered` shell for the round is the recorded exit evidence and stays unscored.
+1. Do not run Step 2b′ autofill, Step 2b″ refine, Step 2c scoring, Step 2d progress, or Step 2e `record-round` enrichment for that selection; the runtime's `answered` shell for the round is the recorded exit evidence and stays unscored.
 2. Record the exit before anything else: `skc deep-interview write --input '{"state":{"exit_reason":"user_enough","exit_round":<n>,"exit_ambiguity":<current_ambiguity>}}' --json`, using the runtime-owned `current_ambiguity` (0..1) from the latest `read`/`apply`/`write` output.
 3. Show the early-exit warning: when ambiguity > threshold, state `Current ambiguity is {score}% (threshold: <resolvedThresholdPercent>)`, list the weakest component/dimension pairs with their scores and open gaps, and name the residual risk of proceeding; when ambiguity ≤ threshold, state that the threshold is already met. Do not follow it with a generic "continue anyway?" ask — the user already chose.
 4. Continue to Phase 4 crystallization as usual (closure audit, Restate gate, spec). The threshold itself is unchanged: an early exit never rewrites `threshold`, `current_ambiguity`, or round scores, and the spec reports the real ambiguity.
@@ -382,13 +383,13 @@ When calling `ask`, SHOULD include optional structured metadata so the runtime c
 
 **Free-text vs structural input (`FREETEXT_FIELDS`).** The runtime keeps an allowlist of fields that legitimately carry prose — `initial_context`, `initial_idea`, `initial_context_summary`, `user_response`, `answer`, `goal`, `objective`, `prompt`, `description`, `statement`, `restated_goal`, `evidence`, `excerpt`. Inside those fields, shell metacharacters (`;`, `|`, `&`, backticks, `$()`) are valid prose and MUST NOT be rejected as structural injection; a user is allowed to describe a shell command. Structural fields (ids, categories, hashes) stay strictly validated by their own guards. Size is capped by character-count, not byte length: 50,000 for initial context and 10,000 for a single user response.
 
-If the `ask` tool returns `clarificationQuestion`, treat it as a non-answer about the displayed choices. Answer the clarification briefly from the current interview context, then call `ask` again with the exact original question, options, and `deepInterview.*` metadata. A clarification bypasses Step 2b′ auto-answer, Step 2b″ free-text refine, Step 2c ambiguity scoring, Step 2d progress reporting, and Step 2e state updates; it must not be recorded as a round answer. This does not violate the one-question-per-round rule because the round remains unresolved until the user submits a real listed option or `Other` answer.
+If the `ask` tool returns `clarificationQuestion`, treat it as a non-answer about the displayed choices. Answer the clarification briefly from the current interview context, then call `ask` again with the exact original question, options, and `deepInterview.*` metadata. A clarification bypasses Step 2b′ autofill, Step 2b″ free-text refine, Step 2c ambiguity scoring, Step 2d progress reporting, and Step 2e state updates; it must not be recorded as a round answer. This does not violate the one-question-per-round rule because the round remains unresolved until the user submits a real listed option or `Other` answer.
 
-### Step 2b′: Auto-Answer Opted-Out Questions
+### Step 2b′: Autofill Opted-Out Questions
 
-After the `ask` tool resolves and before ambiguity scoring, if the user opts out of answering the current question or explicitly asks the agent to decide, load `auto-answer-uncertain.md` as an internal `kind: "skill-fragment"` prompt for a fork-context architect. Pass the opted-out question, prompt-safe transcript summary, locked topology, current scores/gaps, and any auto-research candidates used for the round. The architect must return exactly one decisive answer with rationale, confidence, and explicit uncertainty. Validate the response shape before using it; if valid, record it as the tentative answer for scoring, append the round number to `auto_answered_rounds`, and mark the transcript answer as architect-assisted.
+After the `ask` tool resolves and before ambiguity scoring, if the user opts out of answering the current question or explicitly asks the agent to decide, load `autofill.md` as an internal `kind: "skill-fragment"` prompt for a fork-context architect. Pass the opted-out question, prompt-safe transcript summary, locked topology, current scores/gaps, and any research candidates used for the round. The architect must return exactly one decisive answer with rationale, confidence, and explicit uncertainty. Validate the response shape before using it; if valid, record it as the tentative answer for scoring, append the round number to `autofill_rounds`, and mark the transcript answer as architect-assisted.
 
-Auto-answer has a clarity cap: unless the architect confidence is `high` and uncertainty is negligible, no dimension score improved solely by the auto-answer may exceed `0.85`. If the auto-answer would make ambiguity cross the resolved threshold, ask the user for threshold-crossing confirmation before Phase 4: present the tentative assumption and require explicit confirmation, revision, or continued questioning. On architect failure or invalid response, continue with the user's opt-out as an unresolved gap, increment `architect_failures`, and do not block the interview.
+Autofill has a clarity cap: unless the architect confidence is `high` and uncertainty is negligible, no dimension score improved solely by the autofill may exceed `0.85`. If the autofill would make ambiguity cross the resolved threshold, ask the user for threshold-crossing confirmation before Phase 4: present the tentative assumption and require explicit confirmation, revision, or continued questioning. On architect failure or invalid response, continue with the user's opt-out as an unresolved gap, increment `architect_failures`, and do not block the interview.
 
 ### Step 2b″: Refine Free-Text Answers
 
@@ -396,13 +397,13 @@ When the user's answer is free-text that carries reasoning, constraints, or scop
 
 Offer options such as **Send as-is**, **Add a constraint**, **Mark something out of scope**, **Add context**, and **Rewrite**, plus free-text. If the user picks anything other than "Send as-is", collect the exact missing text with one follow-up `ask` (never infer it from the option label), fold it into the structured interpretation, and re-confirm. Do not advance to scoring while the user is still saying something is missing.
 
-Skip Refine for short answers with no attached reasoning (e.g. "Yes" / "No" / a single proper noun), for pre-built option picks where the structure is already explicit, for auto-confirmed code/brownfield facts, and for architect auto-answers (already structured by Step 2b′). A refined answer counts as direct user judgment: record the round in `refined_rounds` and reset `auto_answer_streak` to 0. Feed the confirmed structured interpretation — not the raw free text — into Step 2c scoring and established-facts maintenance.
+Skip Refine for short answers with no attached reasoning (e.g. "Yes" / "No" / a single proper noun), for pre-built option picks where the structure is already explicit, for auto-confirmed code/brownfield facts, and for architect autofills (already structured by Step 2b′). A refined answer counts as direct user judgment: record the round in `refined_rounds` and reset `autofill_streak` to 0. Feed the confirmed structured interpretation — not the raw free text — into Step 2c scoring and established-facts maintenance.
 
 ### Step 2c: Score Ambiguity
 
 After receiving the user's answer, score clarity across all dimensions.
 
-If the round used an auto-answer, include the architect answer, rationale, confidence, and uncertainty in the scoring prompt. Apply the Step 2b′ clarity cap mechanically before calculating ambiguity, and treat any low-confidence or insufficient-context auto-answer as an unresolved gap rather than user-confirmed truth.
+If the round used an autofill, include the architect answer, rationale, confidence, and uncertainty in the scoring prompt. Apply the Step 2b′ clarity cap mechanically before calculating ambiguity, and treat any low-confidence or insufficient-context autofill as an unresolved gap rather than user-confirmed truth.
 
 Before scoring, compare the new answer against `state.established_facts`. Treat established facts as durable confirmed decisions with source-round evidence; do not score an answer in isolation from facts that the interview has already stabilized.
 
@@ -420,7 +421,7 @@ Use **mechanism A** for every ambiguity rise: a trigger LOWERS the affected comp
 
 - `+0.10` per established fact marked `disputed` that has no `superseded_by` resolution (contradiction pressure)
 - `+0.05` per active topology component whose goal/constraints/criteria clarity is still unscored (gap pressure — persist `topology.components[].clarity_scores` every round or the floor blocks convergence)
-- `+0.05 × (auto-answered rounds / scored rounds)` (assumption dilution)
+- `+0.05 × (autofilled rounds / scored rounds)` (assumption dilution)
 
 Cooperate with the floor rather than fight it:
 - Replacing an already-scored answer for the same round (a retraction/pivot) automatically marks that round's established facts as disputed; ambiguity rises mechanically even when no trigger is reported. Treat a floor-driven rise as trigger evidence and score the affected dimensions accordingly.
@@ -523,7 +524,7 @@ Round {n} complete.
 | Success Criteria | {s} | {w} | {s*w} | {gap or "Clear"} |
 | Context (brownfield) | {s} | {w} | {s*w} | {gap or "Clear"} |
 | **Ambiguity** | | | **{prior_score}% -> {score}% {up|down|flat}** | {if up: trigger name such as "A direct contradiction"} |
-| **Floor** (only when clamped) | | | **{floor}%** | {dominant cause: disputed fact / unscored component / auto-answer dilution} |
+| **Floor** (only when clamped) | | | **{floor}%** | {dominant cause: disputed fact / unscored component / autofill dilution} |
 
 **Topology:** Targeted {target_component_name} | Active: {active_component_count} | Deferred: {deferred_component_count} | Next rotation after: {last_targeted_component_id}
 
@@ -542,8 +543,8 @@ Then apply the self-proofread once to narrative status text, generated prose cel
 
 ### Step 2e: Update State
 
-Update state in two phases. The `ask` answer is first recorded by the runtime as an `answered` shell. Scoring then enriches the same round record to `scored` with global scores, per-component `topology.components[].clarity_scores`, `topology.components[].weakest_dimension`, trigger metadata, established-facts changes, ontology snapshot, `topology.last_targeted_component_id`, `auto_researched_rounds`, `auto_answered_rounds`, and `architect_failures`. When `deepInterview` ask metadata is present, no manual per-round write is required for the answer shell; only scoring enrichment/state maintenance remains. For scoring enrichment and state maintenance, use the native `skc deep-interview` surface and keep every payload **incremental**: stage only the delta for the current round (`stage --for record-round` with just the one round record carrying its `round_key`; the runtime merges it into the existing transcript by durable key), only the changed facts (`--for update-facts`; facts merge losslessly by `id` — a one-fact patch never erases prior facts), or only the changed maintenance fields (`--for merge-state`). Never resend the whole `rounds` array or the full state envelope — earlier rounds are already persisted, resending them is wasteful and racy, and the merge preserves them without your copy. Optionally dry-run with `check`, then commit with `apply`; for a simple immediate update, `skc deep-interview write --input '<json>'` is the one-shot equivalent (incremental merge; add `--reset` only when deliberately replacing state — the locked intent contract survives a reset). Ambiguity is **runtime-owned**: `apply`/`write` derive `current_ambiguity` from the latest scored round and clamp it to the deterministic floor; report the round's scores and your raw `ambiguity` on the round record, then read the effective value back from the command output (`current_ambiguity`/`result_ambiguity`) instead of hand-setting `state.current_ambiguity`. The session resolves from `SKC_SESSION_ID` automatically; exactly one draft is pending at a time, and a revision conflict at `apply` invalidates the draft with typed recovery — re-stage the same small delta against current state, never do revision arithmetic. Never patch `.skc/_session-{sessionid}/state` directly unless an explicit force override is active.
-Also recompute and persist `ambiguity_milestone` each round (detect band transitions for the Phase 3 panel), and persist `auto_answer_streak`, `refined_rounds`, `lateral_reviews`, and `lateral_panel_failures` alongside the existing fields.
+Update state in two phases. The `ask` answer is first recorded by the runtime as an `answered` shell. Scoring then enriches the same round record to `scored` with global scores, per-component `topology.components[].clarity_scores`, `topology.components[].weakest_dimension`, trigger metadata, established-facts changes, ontology snapshot, `topology.last_targeted_component_id`, `research_rounds`, `autofill_rounds`, and `architect_failures`. When `deepInterview` ask metadata is present, no manual per-round write is required for the answer shell; only scoring enrichment/state maintenance remains. For scoring enrichment and state maintenance, use the native `skc deep-interview` surface and keep every payload **incremental**: stage only the delta for the current round (`stage --for record-round` with just the one round record carrying its `round_key`; the runtime merges it into the existing transcript by durable key), only the changed facts (`--for update-facts`; facts merge losslessly by `id` — a one-fact patch never erases prior facts), or only the changed maintenance fields (`--for merge-state`). Never resend the whole `rounds` array or the full state envelope — earlier rounds are already persisted, resending them is wasteful and racy, and the merge preserves them without your copy. Optionally dry-run with `check`, then commit with `apply`; for a simple immediate update, `skc deep-interview write --input '<json>'` is the one-shot equivalent (incremental merge; add `--reset` only when deliberately replacing state — the locked intent contract survives a reset). Ambiguity is **runtime-owned**: `apply`/`write` derive `current_ambiguity` from the latest scored round and clamp it to the deterministic floor; report the round's scores and your raw `ambiguity` on the round record, then read the effective value back from the command output (`current_ambiguity`/`result_ambiguity`) instead of hand-setting `state.current_ambiguity`. The session resolves from `SKC_SESSION_ID` automatically; exactly one draft is pending at a time, and a revision conflict at `apply` invalidates the draft with typed recovery — re-stage the same small delta against current state, never do revision arithmetic. Never patch `.skc/_session-{sessionid}/state` directly unless an explicit force override is active.
+Also recompute and persist `ambiguity_milestone` each round (detect band transitions for the Phase 3 panel), and persist `autofill_streak`, `refined_rounds`, `panel_reviews`, and `panel_failures` alongside the existing fields.
 
 #### Delta payload schemas
 
@@ -595,9 +596,9 @@ To dispute: send `{ "id": "<fact-id>", "disputed": true }`. To supersede: send `
 {
   "state": {
     "ambiguity_milestone": "<band>",
-    "auto_answer_streak": <n>,
+    "autofill_streak": <n>,
     "refined_rounds": [<n>],
-    "lateral_reviews": [ { "round": <n>, "personas": [], "findings": "<summary>" } ],
+    "panel_reviews": [ { "round": <n>, "personas": [], "findings": "<summary>" } ],
     "topology": { "components": [ … ], "last_targeted_component_id": "<id>" }
   }
 }
@@ -623,7 +624,7 @@ Explicit user exit keeps two distinct exit-intent classes in any session languag
 
 The user always keeps passive exit control: any answer, option, or free-text reply can carry an exit intent. Hard cancellations are honored immediately and save state without a spec; early-proceed intents end the interview with the residual-risk warning and a crystallized spec. The standing early-exit option makes the early-proceed path visible on every interview round, so the user never has to type an exit phrase.
 
-## Phase 3: Lateral Review Panel (milestone-triggered)
+## Phase 3: Panel (milestone-triggered)
 
 The interview convenes a short multi-persona panel at **ambiguity-milestone transitions** instead of at fixed round numbers. Define milestone bands from the round's ambiguity score:
 
@@ -634,9 +635,9 @@ The interview convenes a short multi-persona panel at **ambiguity-milestone tran
 | `refined` | 0.30 ≥ a > threshold |
 | `ready` | ≤ threshold |
 
-A transition occurs whenever the band changes versus the prior scored round — in either direction, since bidirectional scoring can move the band back up. On a transition, and also before synthesizing any agent-supplied answer (auto-research candidates, an auto-answer, or a code/brownfield auto-confirm that carries real interpretation), convene the panel before generating or asking the next question.
+A transition occurs whenever the band changes versus the prior scored round — in either direction, since bidirectional scoring can move the band back up. On a transition, and also before synthesizing any agent-supplied answer (research candidates, an autofill, or a code/brownfield auto-confirm that carries real interpretation), convene the panel before generating or asking the next question.
 
-**Personas (run in parallel, independent context):** dispatch `researcher`, `contrarian`, and `simplifier` as parallel fork-context subagents through the `lateral-review-panel.md` fragment, each with its own copy of the prompt-safe context so no persona anchors on another's framing. Add the `architect` persona when the round changed system shape — scope expansion, a new component or integration (trigger D), or any change to ownership or architecture. Each persona is a read-only architect: no edits, no `.skc/` mutation, no execution.
+**Personas (run in parallel, independent context):** dispatch `researcher`, `contrarian`, and `simplifier` as parallel fork-context subagents through the `panel.md` fragment, each with its own copy of the prompt-safe context so no persona anchors on another's framing. Add the `architect` persona when the round changed system shape — scope expansion, a new component or integration (trigger D), or any change to ownership or architecture. Each persona is a read-only architect: no edits, no `.skc/` mutation, no execution.
 
 **Folding findings:** validate each persona response, then fold only concrete, user-safe findings into the next single user-facing question — as 2-3 ranked answer options or one recommended draft. The panel never adds a second question, never mutates requirements on its own, and never marks the interview complete. The one-question-per-round rule stays intact.
 
@@ -648,7 +649,7 @@ A transition occurs whenever the band changes versus the prior scored round — 
 
 **Ontology escalation:** if ambiguity stalls (same score ±0.05 for 3 rounds) or stays > 0.30 after 8 rounds, instruct the panel (especially `contrarian` + `architect`) to ask "What IS this, really?" — identify the core entity versus supporting views from the latest ontology snapshot before returning to feature questions.
 
-**Bookkeeping:** record each convened panel in `state.lateral_reviews` (round, milestone transition or pre-answer trigger, personas dispatched, findings folded). On panel spawn or validation failure, fall back silently to the normal generated question and increment `lateral_panel_failures`; do not expose tool noise unless it changes the next user-facing question. The panel is a prompt-budgeted assist layer — summarize oversized context before dispatch.
+**Bookkeeping:** record each convened panel in `state.panel_reviews` (round, milestone transition or pre-answer trigger, personas dispatched, findings folded). On panel spawn or validation failure, fall back silently to the normal generated question and increment `panel_failures`; do not expose tool noise unless it changes the next user-facing question. The panel is a prompt-budgeted assist layer — summarize oversized context before dispatch.
 
 ### Per-question advisory fanout lanes (distinct from the milestone panel)
 
@@ -670,7 +671,7 @@ When ambiguity ≤ threshold (or hard cap / early exit):
 
 **Before generating the spec, two gates must pass, in order:**
 
-**4a. Closure / Acceptance Guard.** Even when ambiguity ≤ threshold, do not treat the math as completion. Run an independent readiness audit from the full main-session perspective (including explore findings, established facts, and triggers the scorer may not have fully weighed). Confirm every active topology component has goal/constraint/criteria coverage, no unresolved or disputed trigger remains on a path that matters, and no low-confidence auto-answer is standing in for user-confirmed truth above the clarity cap. If a material gap exists, explicitly override the gate to the user — "The math says ready, but I am not accepting it yet because {gap}" — and ask the single highest-impact follow-up, returning to Phase 2. Record any override in `state.closure_overrides`.
+**4a. Closure / Acceptance Guard.** Even when ambiguity ≤ threshold, do not treat the math as completion. Run an independent readiness audit from the full main-session perspective (including explore findings, established facts, and triggers the scorer may not have fully weighed). Confirm every active topology component has goal/constraint/criteria coverage, no unresolved or disputed trigger remains on a path that matters, and no low-confidence autofill is standing in for user-confirmed truth above the clarity cap. If a material gap exists, explicitly override the gate to the user — "The math says ready, but I am not accepting it yet because {gap}" — and ask the single highest-impact follow-up, returning to Phase 2. Record any override in `state.closure_overrides`.
 
 **4b. Restate gate.** Once closure passes, collapse the agreed answers into ONE sentence goal that covers every active component, and confirm it with a single `ask` whose body MUST begin by stating that one-sentence goal verbatim, followed by: "If someone read only this line, would they reach the same outcome you have in mind?" The goal line must be visible inside the `ask` body; never ask the confirmation without first displaying the collapsed goal it refers to. Offer **Yes, crystallize**, **Adjust wording**, and **Missing scope**, plus free-text, applying `language.instruction` when present. Because this gate has options, it MUST go through `ask`: do not print the Restate question and options as assistant prose with `Question:`/`Options:` labels. If the Restate gate was already printed that way, immediately call `ask` with the same question/options before accepting or waiting for any answer. On "Adjust wording" / "Missing scope", collect the exact correction with one follow-up `ask`, route it back through Step 2c scoring and established-facts maintenance (a correction can change ambiguity), then re-run closure and ask the Restate gate again. Cap at two loops; if alignment is not reached, return to Phase 2 with a targeted question instead of forcing a goal line. Persist the confirmed line as `state.restated_goal`.
 
@@ -700,11 +701,11 @@ Spec structure:
 - Status: {PASSED | BELOW_THRESHOLD_EARLY_EXIT}
 - Exit Reason: {threshold_met | user_enough | hard_cap}
 - Ambiguity at Exit: {exit_ambiguity as a percentage, or the final ambiguity when the threshold was met}
-- Auto-Researched Rounds: {auto_researched_rounds}
-- Auto-Answered Rounds: {auto_answered_rounds}
+- Auto-Researched Rounds: {research_rounds}
+- Auto-Answered Rounds: {autofill_rounds}
 - Architect Failures: {architect_failures}
-- Lateral Reviews: {lateral_reviews count with milestones}
-- Lateral Panel Failures: {lateral_panel_failures}
+- Lateral Reviews: {panel_reviews count with milestones}
+- Lateral Panel Failures: {panel_failures}
 - Refined Rounds: {refined_rounds}
 - Closure Overrides: {closure_overrides count, or none}
 - Restated Goal: {restated_goal}
@@ -732,8 +733,8 @@ Spec structure:
 ## Trigger Metadata
 {Summarize per-round trigger metadata: trigger label/status, affected component/dimension, prior -> new ambiguity direction, evidence, contradicted established fact when relevant, and disputed/unresolved rationale when applicable.}
 
-## Lateral Review Panel
-{Summarize convened panels: round, milestone transition or pre-answer trigger, personas dispatched, and the concrete findings folded into questions. Note any lateral_panel_failures.}
+## Panel
+{Summarize convened panels: round, milestone transition or pre-answer trigger, personas dispatched, and the concrete findings folded into questions. Note any panel_failures.}
 
 ## Goal
 {crystal-clear goal statement derived from interview, covering every active topology component}
@@ -827,6 +828,24 @@ After the spec is written, mark it `pending approval` and present execution opti
 
 **IMPORTANT:** On explicit execution selection, **MUST** use the chosen bundled SKC workflow skill entrypoint (`/skill:ralplan`, `/skill:ultragoal`, or `/skill:team`) inside the agent session. `skc ralplan` is a native CLI that accepts the documented skill flags and seeds local `.skc/_session-{sessionid}/state` receipts; agent sessions should still drive the consensus loop through `/skill:ralplan`. Implementation handoff defaults to `/skill:ultragoal`; `/skill:team` is reserved for when tmux-based interactive worker parallelization is genuinely required, and `skc team` is a native tmux runtime command used only when the Team workflow explicitly requires the CLI runtime. Do NOT implement directly. The deep-interview agent is a requirements agent, not an execution agent. If oversized initial context was summarized, pass the spec and prompt-safe summary forward, not the raw oversized source material. Without explicit execution selection, stop with the spec marked `pending approval`.
 
+<!-- skc:cmdref:start state -->
+### Generated command reference: state
+
+Persist the final spec before chaining to Blueprint, Octo, or Voyage. The final write marks Sonar ready for handoff.
+
+Commands:
+- `skc sonar --write --stage final --slug {slug} --spec <markdown-or-path> --deliberate --json`
+  - Persists the final spec and hands off directly to Blueprint.
+
+Examples:
+- check handoff readiness:
+```
+skc sonar read --json
+```
+
+Aliases and bridges:
+- sonar -> blueprint: `skc sonar --write --stage final --slug {slug} --spec <markdown-or-path> --deliberate --json`
+<!-- skc:cmdref:end state -->
 ### Phase 5b: Handoff before chain
 
 Before invoking `/skill:ralplan`, `/skill:team`, or `/skill:ultragoal`, the final spec must already be persisted through the native deep-interview write command (`skc deep-interview --write --stage final …`). That command itself moves the workflow to the `handoff` phase, so no separate state write is needed for the skill tool's chain guard. Verify readiness with:
@@ -882,7 +901,7 @@ Skipping any stage is possible but reduces quality assurance:
 - Use public SKC workflow entrypoints to bridge to ralplan, ultragoal, or team only after explicit execution approval — never implement directly. Implementation handoff defaults to ultragoal; reserve team for when tmux-based interactive worker parallelization is genuinely required.
 - The lateral-review panel spawns read-only persona subagents (Task tool) in parallel with independent context; it is an assist layer, never an executor and never the completion authority
 - Apply the Refine gate (Step 2b″), the Dialectic Rhythm Guard (Step 2a), and the Closure + Restate gates (Phase 4) through the `ask` tool, preserving `language.instruction` for each; if any of these gates has options, the assistant must call `ask` and must not print `Question:`/`Options:` blocks as assistant prose
-- Use internal fragment auto-modes only at their documented hooks: `auto-research-greenfield.md` between Step 2a and 2b for greenfield `research: true` questions, `auto-answer-uncertain.md` as Step 2b′ after `ask` resolves and before scoring, and `lateral-review-panel.md` for the Phase 3 panel personas at ambiguity-milestone transitions and before synthesizing agent-supplied answers.
+- Use internal fragment auto-modes only at their documented hooks: `research.md` between Step 2a and 2b for greenfield `research: true` questions, `autofill.md` as Step 2b′ after `ask` resolves and before scoring, and `panel.md` for the Phase 3 panel personas at ambiguity-milestone transitions and before synthesizing agent-supplied answers.
 - Fragment auto-modes are loaded on demand as `kind: "skill-fragment"`; they are not public workflow skills, not slash-command/discoverable, and not `skill://` registrations.
 </Tool_Usage>
 
@@ -993,14 +1012,14 @@ Why bad: 45% ambiguity means nearly half the requirements are unclear. The mathe
 - [ ] Oversized initial context/history summarized before scoring, question generation, spec generation, or handoff
 - [ ] Round 0 topology gate completed before scoring; `topology.confirmed_at` persisted
 - [ ] Ambiguity scored and displayed every round, naming the weakest component/dimension target (rotating across active components when N > 1)
-- [ ] Every asked question carried a `GUESS:` line (except Round 0 topology, the Restate gate, and clarification re-asks), and no guess was recorded as an answer or counted toward `auto_answer_streak`
+- [ ] Every asked question carried a `GUESS:` line (except Round 0 topology, the Restate gate, and clarification re-asks), and no guess was recorded as an answer or counted toward `autofill_streak`
 - [ ] Lateral panel convened at milestone transitions (and before synthesizing agent-supplied answers) with parallel read-only personas
-- [ ] Free-text answers passed the Refine gate; dialectic rhythm guard forced a user question after 3 agent-resolved answers; any auto-answer threshold crossing explicitly confirmed
+- [ ] Free-text answers passed the Refine gate; dialectic rhythm guard forced a user question after 3 agent-resolved answers; any autofill threshold crossing explicitly confirmed
 - [ ] Closure / Acceptance Guard and the one-sentence Restate gate both passed before crystallization
 - [ ] Interview reached ambiguity ≤ threshold OR an explicit early exit with warning
 - [ ] Every interview-round `ask` from round 1 ended with the standing `This is enough, stop at current ambiguity ({score}%)` option; a user early exit persisted `exit_reason: "user_enough"`, `exit_round`, and `exit_ambiguity`, and the spec reports Exit Reason, Ambiguity at Exit, and Residual Risks
 - [ ] Spec persisted to `.skc/_session-{sessionid}/specs/deep-interview-{slug}.md` exactly via the SKC CLI (no direct `.skc/` edits without force override), covering every active topology component plus goal/constraints/acceptance criteria/clarity/ontology/transcript
-- [ ] Spec metadata includes the auto/lateral counters (`auto_researched_rounds`, `auto_answered_rounds`, `lateral_reviews`, `refined_rounds`, `architect_failures`, `lateral_panel_failures`)
+- [ ] Spec metadata includes the auto/lateral counters (`research_rounds`, `autofill_rounds`, `panel_reviews`, `refined_rounds`, `architect_failures`, `panel_failures`)
 - [ ] Execution bridge presented via `ask`; execution invoked only after explicit approval through a public workflow entrypoint (never direct implementation); state cleaned up after handoff
 </Final_Checklist>
 
@@ -1058,7 +1077,7 @@ Vague prompt → ralplan gate → deep-interview (if extremely vague) → ralpla
 
 See "Calculate ambiguity" in Step 2c for the weighted formulas. Brownfield adds a 15% Context Clarity dimension (Goal/Constraint/Criteria become 35/25/25) because safely modifying existing code requires understanding the system being changed.
 
-## Lateral Review Panel
+## Panel
 
 See Phase 3 for the full persona set (researcher/contrarian/simplifier, plus architect on scope change), the milestone bands, and the parallel independent-context dispatch.
 

@@ -368,6 +368,33 @@ describe("automatic frontend UI skill routing", () => {
 		);
 	});
 
+	it("prioritizes exact demo names, limits suggestions, and excludes terminal work", () => {
+		const context = buildUiSkillActivationContext(
+			"웹 화면의 드롭다운, 툴팁, 팝오버 애니메이션을 Motion의 Expand card 방식과 비교해줘",
+		);
+		const links = context?.match(/https:\/\/designbookmark\.com\/motion#[a-z0-9-]+/g);
+		expect(links).toEqual([
+			"https://designbookmark.com/motion#db-expand-card",
+			"https://designbookmark.com/motion#db-morph-tooltip",
+			"https://designbookmark.com/motion#db-spring-dropdown",
+		]);
+		expect(context?.match(/https:\/\/designbookmark\.com\/motion-src\/code\/[a-z0-9-]+\.txt/g)).toEqual([
+			"https://designbookmark.com/motion-src/code/db-expand-card.txt",
+			"https://designbookmark.com/motion-src/code/db-morph-tooltip.txt",
+			"https://designbookmark.com/motion-src/code/db-spring-dropdown.txt",
+		]);
+		expect(context).toContain("open its source URL with `read` before implementing");
+		expect(context).toContain("If URL reads are disabled or the source is unavailable");
+		expect(buildUiSkillActivationContext("fix terminal dropdown animation")).toBeNull();
+	});
+
+	it("adds the matching demo and source links to the native hook response", async () => {
+		const context = hookContext(await dispatchIsolatedHook("웹에서 탭 전환 애니메이션 다듬어줘"));
+		expect(context).toContain("https://designbookmark.com/motion#db-tab-pill");
+		expect(context).toContain("https://designbookmark.com/motion-src/code/db-tab-pill.txt");
+		expect(context).not.toContain("#db-spring-dropdown");
+	});
+
 	it("injects the directive through the native UserPromptSubmit hook", async () => {
 		const result = await dispatchIsolatedHook("animate the dropdown open");
 		const context = hookContext(result);

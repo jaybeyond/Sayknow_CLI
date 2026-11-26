@@ -209,9 +209,10 @@ describe("CLI help load order", () => {
 		expect(stdout).toContain("skc state");
 		expect(stdout).toContain("skc harness");
 		expect(stdout).toContain("skc config");
-		expect(stdout).toContain("skc ralplan");
-		expect(stdout).toContain("skc ultragoal");
-		expect(stdout).toContain("skc team");
+		for (const name of ["sonar", "blueprint", "octo", "voyage"]) expect(stdout).toContain(`skc ${name}`);
+		for (const name of ["deep-interview", "ralplan", "team", "ultragoal"]) {
+			expect(stdout).not.toMatch(new RegExp(`^  skc ${name}\\s+-`, "m"));
+		}
 		expect(stdout).toContain("skc mcp");
 		expect(stdout).toContain("skc mcp-serve");
 		expect(stdout).toContain("skc contribute-pr");

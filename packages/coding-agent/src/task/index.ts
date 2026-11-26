@@ -45,6 +45,7 @@ import {
 	type TaskToolDetails,
 	type TaskToolSchemaInstance,
 } from "./types";
+import { parseExecutorExecutionMode } from "./ultragoal-redteam-activation";
 
 // Import review tools for side effects (registers subagent tool handlers)
 import "../tools/review";
@@ -1583,7 +1584,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						agent: effectiveAgent,
 						task: renderTaskAssignment(task.assignment, simpleMode),
 						assignment: task.assignment.trim(),
-						executionMode: task.executionMode,
+						executionMode: parseExecutorExecutionMode(task.executionMode),
 						context: sharedContext,
 						description: task.description,
 						index,
@@ -1662,7 +1663,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						agent: effectiveAgent,
 						task: renderTaskAssignment(task.assignment, simpleMode),
 						assignment: task.assignment.trim(),
-						executionMode: task.executionMode,
+						executionMode: parseExecutorExecutionMode(task.executionMode),
 						context: sharedContext,
 						description: task.description,
 						index,

@@ -1,11 +1,11 @@
 ---
 name: ultragoal
-description: Create and execute durable repo-native multi-goal plans over SKC goal mode artifacts.
+description: Voyage durable multi-goal execution with a repo-local ledger
 
 source: "forked from upstream ultragoal skill and rebranded for SKC"
 ---
 
-# Ultragoal Workflow
+# Voyage: Durable Goal Execution
 
 Use when the user asks for `ultragoal`, `create-goals`, `complete-goals`, durable multi-goal planning, or sequential execution over SKC goal mode.
 
@@ -25,21 +25,21 @@ When ultragoal detects its own current-session state is corrupt, tampered, unrea
 
 ## Always-used command examples
 
-Use these exact `skc ultragoal` commands before spending tool calls rediscovering syntax:
+Use these `skc voyage` commands. The legacy `skc ultragoal` spelling is still accepted:
 
 ```sh
-skc ultragoal status
-skc ultragoal status --json
-skc ultragoal create-goals --brief "<brief>"
-skc ultragoal create-goals --brief-file <path>
-skc ultragoal complete-goals
-skc ultragoal complete-goals --retry-failed
-skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<evidence>" --quality-gate-json <quality-gate-json-or-path>
-skc ultragoal checkpoint --goal-id <id> --status failed --evidence "<blocker/evidence>"
-skc ultragoal record-review-blockers --goal-id <id> --title "Resolve final review blockers" --objective "<blocker-resolution objective>" --evidence "<review findings>"
-skc ultragoal succession offer --target-repo <path> --goal-id <id> --authorize "<statement>" --authorized-by <identity>
-skc ultragoal succession adopt --offer <path>
-skc ultragoal succession status --json
+skc voyage status
+skc voyage status --json
+skc voyage create-goals --brief "<brief>"
+skc voyage create-goals --brief-file <path>
+skc voyage complete-goals
+skc voyage complete-goals --retry-failed
+skc voyage checkpoint --goal-id <id> --status complete --evidence "<evidence>" --quality-gate-json <quality-gate-json-or-path>
+skc voyage checkpoint --goal-id <id> --status failed --evidence "<blocker/evidence>"
+skc voyage record-review-blockers --goal-id <id> --title "Resolve final review blockers" --objective "<blocker-resolution objective>" --evidence "<review findings>"
+skc voyage succession offer --target-repo <path> --goal-id <id> --authorize "<statement>" --authorized-by <identity>
+skc voyage succession adopt --offer <path>
+skc voyage succession status --json
 ```
 
 Use these exact goal-tool calls for the inline goal state:
@@ -82,10 +82,10 @@ goal({"op":"resume"})
    Stories become `G001`, `G002`, … in order.
 
 2. Run one of:
-   - `skc ultragoal create-goals --brief "<brief>"`
-   - `skc ultragoal create-goals --brief-file <path>`
-   - `cat <brief> | skc ultragoal create-goals --from-stdin`
-   - `skc ultragoal create-goals --skc-goal-mode per-story --brief "<brief>"` only when one SKC goal context per story is explicitly preferred
+   - `skc voyage create-goals --brief "<brief>"`
+   - `skc voyage create-goals --brief-file <path>`
+   - `cat <brief> | skc voyage create-goals --from-stdin`
+   - `skc voyage create-goals --skc-goal-mode per-story --brief "<brief>"` only when one SKC goal context per story is explicitly preferred
 3. Inspect `.skc/_session-{sessionid}/ultragoal/goals.json` and refine if needed.
 
 ### Create-goals granularity: merge validation-coupled stories
@@ -101,9 +101,9 @@ Fanning out executor slices inside a single merged goal keeps one review/QA boun
 
 ## Complete goals
 
-Loop until `skc ultragoal status` reports all goals complete:
+Loop until `skc voyage status` reports all goals complete:
 
-1. Run `skc ultragoal complete-goals`.
+1. Run `skc voyage complete-goals`.
 2. Read the printed handoff.
 3. Call `goal({"op":"get"})`.
 4. If no active SKC goal exists, call `goal({"op":"create","objective":"<printed payload objective>"})` with the printed payload. In aggregate mode, if the same aggregate objective is already active, continue the current SKC story without creating a new SKC goal. If `goal({"op":"get"})` shows a stale dropped goal (status `"dropped"`) and a new aggregate must start, no extra cleanup is needed — `goal({"op":"create"})` succeeds directly. If a previous aggregate is still active and you genuinely need a fresh start in the same session, call `goal({"op":"drop"})` first, then `goal({"op":"create"})`.
@@ -111,26 +111,26 @@ Loop until `skc ultragoal status` reports all goals complete:
 6. Run a completion audit against the story objective and real artifacts/tests.
 7. Before any `--status complete` checkpoint, run the mandatory final cleanup/review gate below. In aggregate mode, do **not** call `goal({"op":"complete"})` for intermediate stories; checkpoint each story while the aggregate objective is still `active`. On the final story, create the final aggregate receipt first; only after that receipt exists may `goal({"op":"complete"})` run.
 8. Checkpoint the durable ledger. Complete checkpoints require `--quality-gate-json` only:
-   `skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<evidence>" --quality-gate-json <quality-gate-json-or-path>`
-   A successful complete checkpoint is story completion, not automatic run completion. Read the checkpoint output: when it prints `Next ultragoal goal: <id>`, continue that active story under the same aggregate SKC goal; when it prints `All ultragoal goals are complete`, the durable run is terminal. `skc ultragoal complete-goals` remains the supported manual next-story command if continuation output was missed.
+   `skc voyage checkpoint --goal-id <id> --status complete --evidence "<evidence>" --quality-gate-json <quality-gate-json-or-path>`
+   A complete checkpoint ends the story, not necessarily the run. If it prints `Next ultragoal goal: <id>`, continue that story under the same aggregate goal. `All ultragoal goals are complete` indicates the durable run is terminal. If continuation output was missed, run `skc voyage complete-goals`.
 9. If blocked or failed, checkpoint failure:
-   `skc ultragoal checkpoint --goal-id <id> --status failed --evidence "<blocker/evidence>"`
+   `skc voyage checkpoint --goal-id <id> --status failed --evidence "<blocker/evidence>"`
 10. For legacy per-story completed-goal blockers, preserve the non-terminal blocker with:
-   `skc ultragoal checkpoint --goal-id <id> --status blocked --evidence "<completed legacy SKC goal blocks goal create in this thread>"`
-11. Resume failed goals with `skc ultragoal complete-goals --retry-failed`.
+   `skc voyage checkpoint --goal-id <id> --status blocked --evidence "<completed legacy SKC goal blocks goal create in this thread>"`
+11. Resume failed goals with `skc voyage complete-goals --retry-failed`.
 
 ## Blocker triage and pause discipline
 
 An active Ultragoal run must not give up on a blocker by pausing the goal and asking the user. Classify every blocker before deciding what to do, and default to `resolvable` when unsure:
 
-- **`resolvable`** — anything the agent can act on: failing tests, missing implementation, a dependency to install, an ambiguous-but-inferable detail, investigation. **Never pause.** Exhaust autonomous resolution first: investigate, `skc ultragoal steer --kind add_subgoal --title "Investigate blocker" --objective "..." --evidence "..." --rationale "..."`, delegate an `executor`, or preserve the blocker durably with `skc ultragoal checkpoint --status blocked` / `skc ultragoal record-review-blockers` and keep scheduling the next goal.
+- **`resolvable`** — anything the agent can act on, including failing tests, missing implementation, installable dependencies, inferable details, and investigation. **Never pause.** Investigate, delegate an `executor`, or use `skc voyage steer --kind add_subgoal`, `skc voyage checkpoint --status blocked`, or `skc voyage record-review-blockers` and keep scheduling work.
 - **`human_blocked`** — only the user can act: credentials/secrets, a manual or physical step, an external approval/decision, access the agent lacks. Pause is the last resort and is gated.
 
 `goal({"op":"pause"})` is **blocked at runtime** while an Ultragoal run is active unless the latest `blocker_classified` ledger event is `human_blocked` and a later bound clean pause terminal critic verdict is recorded for it (see [Terminal critic gate](#terminal-critic-gate)). `assertUltragoalPauseAllowed` first consumes a pre-existing give-up nudge (a durable ledger write) before it runs the read-only pause diagnostic; only `isUltragoalPauseBlocked` is a pure reader. To pause, first record the human-only classification and capture its event id, then record the terminal critic's clean bound pause verdict, and only then pause:
 
 ```sh
-skc ultragoal classify-blocker --classification human_blocked --evidence "<the specific human-only dependency>" [--goal-id <id>]
-skc ultragoal record-critic-verdict --terminus pause --classification-event-id <eventId> --verdict OKAY --evidence "<terminal critic evidence>"
+skc voyage classify-blocker --classification human_blocked --evidence "<the specific human-only dependency>" [--goal-id <id>]
+skc voyage record-critic-verdict --terminus pause --classification-event-id <eventId> --verdict OKAY --evidence "<terminal critic evidence>"
 goal({"op":"pause"})
 ```
 
@@ -138,7 +138,7 @@ Recording `--classification resolvable` is an audit note only; it never authoriz
 
 ## Dynamic steering
 
-Use `skc ultragoal steer` when real findings or blockers prove the current story decomposition should change while the aggregate objective and constraints stay fixed. Steering is explicit-only and evidence-backed; broad natural-language requests are rejected instead of guessed.
+Use `skc voyage steer` when real findings or blockers change how stories should be split or ordered, without changing the aggregate objective or constraints. Steering requires explicit evidence; broad requests are rejected instead of guessed.
 
 Allowed mutation kinds are:
 
@@ -152,12 +152,12 @@ Allowed mutation kinds are:
 Examples:
 
 ```sh
-skc ultragoal steer --kind add_subgoal --title "Investigate blocker" --objective "Validate the blocker and report evidence." --evidence "log/test output" --rationale "The blocker changes the safe execution order." --json
-skc ultragoal steer --kind split_subgoal --goal-id G002 --replacements-json '[{"title":"Fix parser","objective":"Resolve parser blocker."},{"title":"Verify parser","objective":"Run focused parser verification."}]' --evidence "Implementation split found two separable risks" --rationale "Splitting keeps each sub-goal independently verifiable." --json
-skc ultragoal steer --kind reorder_pending --order-json '["G003","G002"]' --evidence "Dependency order changed after investigation" --rationale "G003 must land before G002 can proceed safely." --json
-skc ultragoal steer --kind revise_pending_wording --goal-id G002 --title "Clarify blocker story" --evidence "The current title hides the actual blocker" --rationale "Clear wording keeps the ledger auditable." --json
-skc ultragoal steer --kind annotate_ledger --evidence "User changed release ordering at runtime" --rationale "The aggregate objective is unchanged, but the execution history needs an audit note." --json
-skc ultragoal steer --kind mark_blocked_superseded --goal-id G004 --evidence "The blocked work is no longer required because replacement evidence covers it" --rationale "No replacement sub-goal is needed; superseding only the blocked sub-goal unblocks final completion without changing the aggregate objective." --json
+skc voyage steer --kind add_subgoal --title "Investigate blocker" --objective "Validate the blocker and report evidence." --evidence "log/test output" --rationale "The blocker changes the safe execution order." --json
+skc voyage steer --kind split_subgoal --goal-id G002 --replacements-json '[{"title":"Fix parser","objective":"Resolve parser blocker."},{"title":"Verify parser","objective":"Run focused parser verification."}]' --evidence "Implementation split found two separable risks" --rationale "Splitting keeps each sub-goal independently verifiable." --json
+skc voyage steer --kind reorder_pending --order-json '["G003","G002"]' --evidence "Dependency order changed after investigation" --rationale "G003 must land before G002 can proceed safely." --json
+skc voyage steer --kind revise_pending_wording --goal-id G002 --title "Clarify blocker story" --evidence "The current title hides the actual blocker" --rationale "Clear wording keeps the ledger auditable." --json
+skc voyage steer --kind annotate_ledger --evidence "User changed release ordering at runtime" --rationale "The aggregate objective is unchanged, but the execution history needs an audit note." --json
+skc voyage steer --kind mark_blocked_superseded --goal-id G004 --evidence "The blocked work is no longer required because replacement evidence covers it" --rationale "No replacement sub-goal is needed; superseding only the blocked sub-goal unblocks final completion without changing the aggregate objective." --json
 ```
 
 `--directive-json` and UserPromptSubmit structured steering are planned/deferred routing surfaces, not part of the native typed `--kind` CLI path described above.
@@ -230,7 +230,7 @@ For failed, timed-out, or contract-violating slices, record durable ledger evide
 
 Sequential execution remains the default. Ultragoal may use runtime-backed pipelined scheduling only when `goals.json` metadata proves original-plan independence and disjoint target files/surfaces for the prior and next goals. This is a leader-owned Ultragoal runtime contract, not hidden Team scheduling and not a substitute for the native executor parallelism contract above.
 
-Pipeline metadata is explicit-only: create eligible goals with `skc ultragoal create-goals --goal-metadata-json '<json>'` or the equivalent runtime `createUltragoalPlan({ goalMetadata })` input. Brief-only or missing metadata remains valid but non-eligible and falls back to ordinary sequential scheduling. The initial pipeline contract is **aggregate mode only**; per-story mode remains sequential until a separate UX/state contract exists.
+Pipeline metadata is explicit-only: create eligible goals with `skc voyage create-goals --goal-metadata-json '<json>'` or `createUltragoalPlan({ goalMetadata })`. Brief-only or missing metadata remains valid but ineligible and falls back to sequential scheduling. Pipelining is **aggregate mode only**.
 
 The full lifecycle commands (`start-pipeline-overlap`, `join-pipeline-overlap`, `rebaseline-pipeline-overlap`) and the fail-closed overlap rules — at most one eligible next goal per join window, G(N) remains active until a clean join, quarantine and re-baseline on dirty joins or lost handles, complete checkpoints fail closed on open overlaps or unattributable change-set paths — are specified in the internal `pipeline-validation-contracts` fragment (`skill-fragments/ultragoal/pipeline-validation-contracts.md`). Load that fragment before operating an overlap; the runtime enforces its rules verbatim.
 
@@ -238,24 +238,24 @@ Team remains explicit and separate: Team is not auto-launched, not a hidden pipe
 
 ## Validation batches (aggregate-only)
 
-Validation batches let several aggregate-mode goals that share one review/QA boundary defer their heavyweight architect + executor QA/red-team review to a single **final member**, while each non-final member still proves targeted verification and cleanup. Validation batches are **aggregate-only**, **explicit-only**, and **fail-closed**. They are created only through `--validation-batch-json`; there is no inference from brief prose and no per-story batching.
+Validation batches let several aggregate-mode goals that share one review/QA boundary defer their heavyweight architect + executor QA/red-team review to a single **final member**, while each non-final member still proves targeted verification and cleanup. Validation batches are **aggregate-only**, **explicit-only**, and **fail-closed**. They are created only through `--batch-json`; there is no inference from brief prose and no per-story batching.
 
-Batches and #1701 pipeline metadata/overlap are **mutually exclusive**: `--validation-batch-json` and `--goal-metadata-json` cannot be combined, and a goal may not carry both `validationBatch` and eligible `pipelineMetadata`. There is no batch/pipeline mixing.
+Batches and #1701 pipeline metadata/overlap are **mutually exclusive**: `--batch-json` and `--goal-metadata-json` cannot be combined, and a goal may not carry both `validationBatch` and eligible `pipelineMetadata`. There is no batch/pipeline mixing.
 
 Create a batch explicitly:
 
 ```sh
-skc ultragoal create-goals --brief-file <path> --validation-batch-json '[{"schemaVersion":1,"batchId":"VB001","memberIds":["G001","G002","G003"],"finalGoalId":"G003"}]'
+skc voyage create-goals --brief-file <path> --batch-json '[{"schemaVersion":1,"batchId":"VB001","memberIds":["G001","G002","G003"],"finalGoalId":"G003"}]'
 ```
 
 Checkpoint contract summary — the full contract lives in the `pipeline-validation-contracts` fragment (`skill-fragments/ultragoal/pipeline-validation-contracts.md`); load it before checkpointing any batch member:
 
-- **Non-final members** checkpoint `complete` with a single top-level `deferredToBatch` quality gate (kind `validation-batch-deferred`) proving targeted verification, an ai-slop-cleaner pass, a rerun iteration, and a cumulative-since-base change set — never `architectReview`, `executorQa`, or `validationBatchClose`; deferring never manufactures fake review approvals.
-- **The final member** (`finalGoalId`) checkpoints `complete` with the normal full strict gate PLUS a top-level `validationBatchClose` proof covering all members; out-of-order close is rejected, close state is append-only proof on the final member only, and batch invalidation is fail-closed.
+- **Non-final members** checkpoint `complete` with a single top-level `batchDeferred` quality gate (kind `batch-deferred`) proving targeted verification, an cleanup pass, a rerun iteration, and a cumulative-since-base change set — never `review`, `verify`, or `batchClose`; deferring never manufactures fake review approvals.
+- **The final member** (`finalGoalId`) checkpoints `complete` with the normal full strict gate PLUS a top-level `batchClose` proof covering all members; out-of-order close is rejected, close state is append-only proof on the final member only, and batch invalidation is fail-closed.
 
 ### Intra-goal validation-lane parallelism
 
-Within a single goal (including a single-goal run or one validation-batch member), architect review and the executor QA/red-team lane MAY run in parallel, but only on the same **frozen post-cleaner change set**: run the ai-slop-cleaner to a zero-blocker pass and rerun verification first, then hand both lanes the identical frozen change-set summary. Parallel architect + executor QA/red-team lanes must **join before checkpoint** — neither lane may checkpoint independently. Fall back to **sequential** lanes when code is still changing, when the two lanes would see divergent snapshots, when the red-team lane depends on architect fixes, or when architect findings gate the QA scope.
+Within a single goal (including a single-goal run or one validation-batch member), architect review and the executor QA/red-team lane MAY run in parallel, but only on the same **frozen post-cleaner change set**: run the cleanup to a zero-blocker pass and rerun verification first, then hand both lanes the identical frozen change-set summary. Parallel architect + executor QA/red-team lanes must **join before checkpoint** — neither lane may checkpoint independently. Fall back to **sequential** lanes when code is still changing, when the two lanes would see divergent snapshots, when the red-team lane depends on architect fixes, or when architect findings gate the QA scope.
 
 ## Use Ultragoal and Team together
 
@@ -264,14 +264,14 @@ Use ultragoal and team together for a durable Ultragoal story that benefits from
 The leader checkpoints Ultragoal from Team evidence plus the current-session SKC goal snapshot; durable state remains leader-owned in `goals.json` and `ledger.jsonl`:
 
 ```sh
-skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/_session-{sessionid}/ultragoal and <id>>" --quality-gate-json <quality-gate-json-or-path>
+skc voyage checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/_session-{sessionid}/ultragoal and <id>>" --quality-gate-json <quality-gate-json-or-path>
 ```
 
-Workers do not own ultragoal goal state, do not create worker ultragoal ledgers, and do not checkpoint Ultragoal. Workers must not run `skc ultragoal checkpoint`; checkpoint authority stays with the leader after worker tasks are terminal. Team launch remains explicit; Ultragoal does not auto-launch Team and performs no hidden goal mutation.
+Workers do not own ultragoal goal state, do not create worker ultragoal ledgers, and do not checkpoint Ultragoal. Workers must not run `skc voyage checkpoint`; checkpoint authority stays with the leader after worker tasks are terminal. Team launch remains explicit; Ultragoal does not auto-launch Team and performs no hidden goal mutation.
 
 ## Internal Ultragoal sub-skill fragments
 
-The completion-gate cleanup sweep is driven by `ai-slop-cleaner`, an internal Ultragoal sub-skill bundled as a `kind: "skill-fragment"` prompt with parent skill `ultragoal` (installed at `skill-fragments/ultragoal/ai-slop-cleaner.md`). It is analogous to deep-interview's auto-research fragment: loaded on demand for one specific hook, never a user-facing skill.
+The completion-gate cleanup sweep is driven by `cleanup`, an internal Ultragoal sub-skill bundled as a `kind: "skill-fragment"` prompt with parent skill `ultragoal` (installed at `skill-fragments/ultragoal/cleanup.md`). It is analogous to deep-interview's auto-research fragment: loaded on demand for one specific hook, never a user-facing skill.
 
 - It is not slash-command discoverable, has no public skill-listing entry, and is never resolvable through `skill://`.
 - It is a read-only detector+reporter over the active story's changed files only: it never edits code, writes files, mutates `.skc/`, checkpoints, calls goal tools, or spawns workflows.
@@ -284,35 +284,35 @@ The completion-gate cleanup sweep is driven by `ai-slop-cleaner`, an internal Ul
 An ultragoal story cannot be checkpointed `complete` until the active agent has run the quality gate. The gate is plan-first, contract-driven, and surface-based:
 
 1. Run targeted implementation verification for the story.
-2. Run the internal ai-slop-cleaner skill fragment as the cleanup sweep on the story's changed files only, so only clean code reaches the review and red-team lanes. It is a read-only detector that emits an `AI SLOP CLEANUP REPORT`; if there are no relevant edits it still runs and records a passed/no-op report. Every BLOCKING cleaner finding is a completion blocker: the leader spawns an `executor` to fix blocking findings only, then reruns the cleaner until blocking findings are zero. Advisory findings are included in the gate report only and are not written to the Ultragoal ledger. Carry the report through the existing `qualityGate.iteration.evidence` field; do not add a new top-level quality-gate key.
+2. Run the internal cleanup skill fragment as the cleanup sweep on the story's changed files only, so only clean code reaches the review and red-team lanes. It is a read-only detector that emits an `CLEANUP REPORT`; if there are no relevant edits it still runs and records a passed/no-op report. Every BLOCKING cleaner finding is a completion blocker: the leader spawns an `executor` to fix blocking findings only, then reruns the cleaner until blocking findings are zero. Advisory findings are included in the gate report only and are not written to the Ultragoal ledger. Carry the report through the existing `qualityGate.rerun.evidence` field; do not add a new top-level quality-gate key.
 3. Rerun verification after the cleaner pass so reviewed evidence covers the cleaned code.
 4. Delegate an `architect` review covering all three lanes:
    - architecture-side: system boundaries, layering, data/control flow, operational risks.
    - product-side: user-visible behavior, acceptance criteria, edge cases, regressions.
    - code-side: maintainability, tests, integration points, and unsafe shortcuts.
-5. Delegate an `executor` QA/red-team lane with typed `executionMode: "ultragoal-red-team"` (preferred) — or assignment text that explicitly labels Ultragoal completion QA/red-team — to build and run the e2e/red-teaming QA suite appropriate for the story. A bare `executorQa` field-name mention is not enough to activate the mode. This lane must try to break the change, not just confirm the happy path. It must start from the approved plan/spec/acceptance criteria, then user-facing contracts, and only then implementation code as supporting evidence. Plan/code mismatches are blockers, not items to paper over with implementation intent.
+5. Delegate an `executor` QA/red-team lane with typed `executionMode: "attack"` (preferred) — or assignment text that explicitly labels Ultragoal completion QA/red-team — to build and run the e2e/red-teaming QA suite appropriate for the story. A bare `verify` field-name mention is not enough to activate the mode. This lane must try to break the change, not just confirm the happy path. It must start from the approved plan/spec/acceptance criteria, then user-facing contracts, and only then implementation code as supporting evidence. Plan/code mismatches are blockers, not items to paper over with implementation intent.
 6. The executor QA/red-team lane must prove evidence by the real surface under test:
    - GUI/web surfaces require a valid automation transcript plus a non-uniform screenshot. Bare `inlineEvidence` text or typed receipts never prove live GUI/web execution.
    - CLI surfaces require runtime argv replay: `schemaVersion: 1`, `kind: "cli-replay"`, `replaySafe: true`, an allowlisted argv `command`, and replayed output validation. The complete field-by-field replay schema, command allowlist, and `replayExempt` audit contract are specified once in the "For CLI replay artifacts" paragraph below the quality-gate JSON; follow it exactly.
    - Native/desktop/tui surfaces require a structurally valid screenshot, PTY capture with terminal control codes, or app-automation transcript.
    - API/package surfaces require a real artifact file or typed receipt whose artifact `kind` contains one of `api`, `package`, `consumer`, `black-box`, or `test-report`; examples: `api-package-test-report`, `package-consumer-report`, `black-box-api-receipt`. Algorithm/math surfaces require a real artifact file or typed receipt whose artifact `kind` contains one of `property`, `boundary`, `edge`, `adversarial`, `failure`, `math`, `algorithm`, or `test-report`; examples: `property-test-report`, `algorithm-boundary-report`. Bare `inlineEvidence` text alone is not sufficient for any surface.
    - The mandatory **computer-use** red-team suite (`kill-switch-bypass`, `suspended-enforcement`, `permission-revoked`, …) is conditional, not universal: require it only when computer/desktop control is genuinely part of the product surface being dogfooded. For every other product type, prove the change through the matching live surface instead — browser-use automation for web/GUI, bash/CLI live invocation or argv replay for CLI, and real artifacts or typed receipts for API/package/algorithm/math. Editing docs, prompts, or skills that merely mention computer-use does not by itself make the computer-use suite applicable; pick the red-team surface that matches what the change actually ships.
-7. The executor QA/red-team lane must report a matrix using `executorQa.contractCoverage`, `executorQa.surfaceEvidence`, `executorQa.adversarialCases`, and `executorQa.artifactRefs`. Not-applicable rows are allowed only in `contractCoverage` and `surfaceEvidence`; each `status: "not_applicable"` row requires `contractRef` plus `reason`. `adversarialCases` rows cannot be not-applicable.
-8. Run a final code review pass and fold it into the strict quality gate. Clean means `architectReview.architectureStatus`, `architectReview.productStatus`, and `architectReview.codeStatus` are all `"CLEAR"`, `architectReview.recommendation` is `"APPROVE"`, executor QA statuses are `"passed"`, iteration is `"passed"` with `fullRerun: true`, every evidence field is non-empty, every required matrix row is present, and every blockers array is empty. `COMMENT`, `WATCH`, `REQUEST CHANGES`, `BLOCK`, missing evidence, missing or shallow matrix rows, plan/code mismatches, or non-empty blockers are non-clean.
+7. The executor QA/red-team lane must report a matrix using `verify.contractCoverage`, `verify.surfaceEvidence`, `verify.adversarialCases`, and `verify.artifactRefs`. Not-applicable rows are allowed only in `contractCoverage` and `surfaceEvidence`; each `status: "not_applicable"` row requires `contractRef` plus `reason`. `adversarialCases` rows cannot be not-applicable.
+8. Run a final code review pass and fold it into the strict quality gate. Clean means `review.architectureStatus`, `review.productStatus`, and `review.codeStatus` are all `"CLEAR"`, `review.recommendation` is `"APPROVE"`, executor QA statuses are `"passed"`, iteration is `"passed"` with `fullRerun: true`, every evidence field is non-empty, every required matrix row is present, and every blockers array is empty. `COMMENT`, `WATCH`, `REQUEST CHANGES`, `BLOCK`, missing evidence, missing or shallow matrix rows, plan/code mismatches, or non-empty blockers are non-clean.
 9. If the architect or executor QA lane finds a blocker, do **not** checkpoint `complete` or call `goal({"op":"complete"})`. Join those two lanes, deduplicate their blocking findings, and record them together with one `record-review-blockers` call as one blocker story for this pass. Wait only for lanes still running on the same change set; a lane that fails or cannot finish is itself a blocker. The cleaner's in-loop cleanup remains separate. Advisories alone do not open a blocker story or prevent `CLEAR` / `APPROVE` when all requirements pass.
    ```sh
-   skc ultragoal record-review-blockers --goal-id <id> --title "Resolve verification blockers" --objective "<blocker-resolution objective>" --evidence "<architect/executor findings>"
+   skc voyage record-review-blockers --goal-id <id> --title "Resolve verification blockers" --objective "<blocker-resolution objective>" --evidence "<architect/executor findings>"
    ```
 10. Fix the blocker story using the bounded re-review rules in "Blocker triage and delta re-review" below, then run the full completion gate on the final frozen change set. Repeat until the final pass is clean.
 11. Only after the loop is clean, checkpoint the story as complete with a structured quality gate. The checkpoint creates a receipt in `ledger.jsonl`; `goals.json.status` alone is not proof. In aggregate mode, the final aggregate receipt must exist before the agent calls `goal({"op":"complete"})` to reconcile the inline UX goal state.
 
-While an Ultragoal run is active, the `ask` tool is blocked for all agents. Record unresolved review decisions as durable blockers with `skc ultragoal record-review-blockers` instead of prompting interactively.
+While a Voyage run is active, `ask` is blocked for all agents. Record unresolved review decisions with `skc voyage record-review-blockers` instead.
 
 The native `checkpoint --status complete` command rejects missing or shallow gates. `--quality-gate-json` must include:
 
 ```json
 {
-  "architectReview": {
+  "review": {
     "architectureStatus": "CLEAR",
     "productStatus": "CLEAR",
     "codeStatus": "CLEAR",
@@ -321,13 +321,13 @@ The native `checkpoint --status complete` command rejects missing or shallow gat
     "commands": ["architect review command or agent evidence id"],
     "blockers": []
   },
-  "executorQa": {
+  "verify": {
     "status": "passed",
     "e2eStatus": "passed",
-    "redTeamStatus": "passed",
+    "attackStatus": "passed",
     "evidence": "executor-built e2e and red-team QA commands/results",
     "e2eCommands": ["bun test:e2e"],
-    "redTeamCommands": ["bun test:red-team"],
+    "attackCommands": ["bun test:red-team"],
     "artifactRefs": [
       { "id": "<ref-id>", "kind": "<surface-appropriate kind; see step 6>", "path": "artifacts/<file>", "description": "live-surface evidence" }
     ],
@@ -342,7 +342,7 @@ The native `checkpoint --status complete` command rejects missing or shallow gat
     ],
     "blockers": []
   },
-  "iteration": {
+  "rerun": {
     "status": "passed",
     "evidence": "blockers absent or resolved and the full loop was rerun cleanly",
     "fullRerun": true,
@@ -371,11 +371,11 @@ The terminal critic gate is a fail-closed, once-per-run-terminus review. It guar
 
 ### Completion terminus
 
-Before assembling the final-aggregate `--quality-gate-json`, the leader delegates the terminal critic. Only the final-aggregate completion checkpoint requires the additional top-level `criticReview` key; `criticReview` is tolerated but ignored on non-final checkpoints. A clean final aggregate requires `verdict: "OKAY"`, non-empty `evidence`, and an empty `blockers` array:
+Before assembling the final-aggregate `--quality-gate-json`, the leader delegates the terminal critic. Only the final-aggregate completion checkpoint requires the additional top-level `signoff` key; `signoff` is tolerated but ignored on non-final checkpoints. A clean final aggregate requires `verdict: "OKAY"`, non-empty `evidence`, and an empty `blockers` array:
 
 ```json
 {
-  "criticReview": {
+  "signoff": {
     "verdict": "OKAY",
     "evidence": "terminal critic review of the final required-goal state",
     "blockers": []
@@ -385,19 +385,19 @@ Before assembling the final-aggregate `--quality-gate-json`, the leader delegate
 
 ### Pause/blocked terminus
 
-At a `human_blocked` terminus, the leader first runs `skc ultragoal classify-blocker --classification human_blocked` (capturing that classification's ledger `eventId`), then delegates the terminal critic and records its verdict with `skc ultragoal record-critic-verdict --terminus pause --classification-event-id <eventId>` before calling `goal({"op":"pause"})`. The pause is allowed only when a later fresh `critic_verdict` ledger receipt exists with `terminus: "pause"`, `verdict: "OKAY"`, non-empty evidence, an empty blockers array, the current `planGeneration`, and a `classificationEventId` bound to the latest `blocker_classified` event, which must be `human_blocked`. Freshness is scoped to the final required-goal state, so required-goal or steer changes stale the receipt, and a newer classification supersedes an older verdict.
+At a `human_blocked` terminus, the leader runs `skc voyage classify-blocker --classification human_blocked` and captures the ledger `eventId`. Delegate the terminal critic and record its verdict with `skc voyage record-critic-verdict --terminus pause --classification-event-id <eventId>` before calling `goal({"op":"pause"})`. The verdict receipt must be later and fresh, with `terminus: "pause"`, `verdict: "OKAY"`, non-empty evidence, no blockers, the current `planGeneration`, and a `classificationEventId` matching the latest `human_blocked` classification. Required-goal and steering changes can stale the receipt, and a newer classification supersedes an older verdict.
 
-The critic must verify that the `human_blocked` classification is genuine, including catching false pauses where needed resources exist locally or the asserted blocker is resolvable. A `REJECT` (or `ITERATE`) verdict refuses the terminal pause; the run keeps executing. The pause (`goal({"op":"pause"})`) is the gated terminal park-and-wait exit — a per-goal `skc ultragoal checkpoint --status blocked` remains available as non-terminal blocker bookkeeping that never signals run completion and keeps the blocker outstanding until resolved.
+The critic verifies the human dependency and checks whether local resources or autonomous work could resolve it. `REJECT` or `ITERATE` refuses a pause. `goal({"op":"pause"})` parks the run; `skc voyage checkpoint --status blocked` only records an outstanding story blocker and never signals completion.
 
 ### Invocation and containment
 
 At each terminus, the leader gives the read-only `critic` role agent `brief.md`, `goals.json`, `ledger.jsonl`, and the cumulative change set. For completion, invoke it before assembling the final-aggregate gate JSON. For pause, invoke it after the `human_blocked` classification and before `goal({"op":"pause"})`. The terminal critic must not spawn nested `ralplan`, `team`, `deep-interview`, or `ultragoal` workflows. This creates no interactive surface: `ask` remains blocked while an Ultragoal run is active.
 
-On repeat terminus attempts within the same run (after an `ITERATE`/`REJECT` reopen cycle or a superseded pause classification), **resume the prior terminal-critic subagent when resumable** instead of freshly spawning one: the critic already holds `brief.md`, `goals.json`, the ledger history, and its own prior findings, so re-invocation only needs the delta (new ledger events, the updated cumulative change set, and evidence addressing the prior blockers). Resume via existing `subagent` resume/steer controls; on `context_unavailable`, `not_found`, `no_runner`, or `resume_failed` — or after a process restart — fall back to a fresh `critic` spawn with the full context bundle. A resumed terminal critic remains read-only, keeps the same containment rules, and must issue a fresh verdict against the current state — a prior `ITERATE` is never carried forward as pre-judged, and each verdict is still recorded through `skc ultragoal record-critic-verdict`.
+On repeat terminus attempts within the same run (after an `ITERATE`/`REJECT` reopen cycle or a superseded pause classification), **resume the prior terminal-critic subagent when resumable** instead of freshly spawning one: the critic already holds `brief.md`, `goals.json`, the ledger history, and its own prior findings, so re-invocation only needs the delta (new ledger events, the updated cumulative change set, and evidence addressing the prior blockers). Resume via existing `subagent` resume/steer controls; on `context_unavailable`, `not_found`, `no_runner`, or `resume_failed` — or after a process restart — fall back to a fresh `critic` spawn with the full context bundle. A resumed terminal critic remains read-only, keeps the same containment rules, and must issue a fresh verdict against the current state — a prior `ITERATE` is never carried forward as pre-judged, and each verdict is still recorded through `skc voyage record-critic-verdict`.
 
 ### Non-OKAY loop and ceiling
 
-For completion-side `ITERATE` or `REJECT`, the leader MUST first record the terminal verdict so the run-level counter observes it: `skc ultragoal record-critic-verdict --terminus completion --verdict <ITERATE|REJECT> --evidence "<critic findings>"`; then record the findings with `skc ultragoal record-review-blockers` and reopen the run. The dedicated counter ceiling is 5, independently of the give-up nudge budget, and is **RUN-LEVEL**: it counts every non-OKAY terminal-critic verdict across the whole run and all reopen cycles. On reaching that ceiling, both pause and final completion are blocked until a human or leader records `skc ultragoal record-critic-gate-override --evidence "<authorization evidence>"`. There is no automatic pause override.
+For completion-side `ITERATE` or `REJECT`, first record the verdict with `skc voyage record-critic-verdict --terminus completion --verdict <ITERATE|REJECT> --evidence "<critic findings>"`, then reopen with `skc voyage record-review-blockers`. The ceiling of 5 counts every non-OKAY terminal verdict across the run, independently of the nudge budget. At the ceiling, both pause and completion are blocked until a human or leader records `skc voyage record-critic-gate-override --evidence "<authorization evidence>"`. There is no automatic override.
 
 This gate is always fail-closed and has no grandfathering: in-flight runs must obtain a terminal verdict when they reach a terminus.
 
@@ -407,7 +407,7 @@ Gating active-aggregate `goal drop` after nudge exhaustion is a known follow-up 
 
 ## Review mode
 
-`skc ultragoal review` runs the same hardened gate against an already implemented PR, branch, or worktree. Use `--pr <number>` for a PR, `--branch <ref>` for a branch diff, omit both for the current worktree, and pass `--spec <path>` when a real contract exists. `--mode review-only` emits the verdict/findings without creating fix work; `--mode review-start` records review blockers for follow-up. Review mode validates the same `executorQa` shape and live-surface artifacts as `checkpoint --status complete`. A thin or derived-only contract can never clean-pass: the verdict is capped at `inconclusive: weak-contract` until a supplied spec or equivalent strong acceptance criteria are available.
+`skc voyage review` runs the same gate against an implemented PR, branch, or worktree. Use `--pr <number>` or `--branch <ref>`, or omit both for the worktree. Pass `--spec <path>` for a real contract. `--mode review-only` reports the verdict; `--mode review-start` records blockers. Review validates the same `verify` shape and live-surface artifacts as a complete checkpoint. Without a strong contract, the best verdict is `inconclusive: weak-contract`.
 
 Receipts are freshness-scoped:
 - Per-goal receipts remain fresh for their target goal unless that goal, its blocker metadata, or its supersession metadata changes.
@@ -415,6 +415,26 @@ Receipts are freshness-scoped:
 - Appending required goals or changing final required-goal state stales final aggregate receipts. Final aggregate completion requires a fresh final aggregate receipt proving no incomplete, blocked, or `review_blocked` required goals remain.
 - Deferred per-goal receipts (validation-batch members) are incomplete until a matching fresh batch-close receipt exists on the batch's `finalGoalId`; a story-scope query for a deferred member stays blocked until that close, and mutating a member after close stales the batch-close and final aggregate receipts.
 
+<!-- skc:cmdref:start state -->
+### Generated command reference: state
+
+When the aggregate Voyage run is complete or the user requests planning or clarification, mark Voyage ready for handoff.
+
+Commands:
+- `skc state voyage write --input '{"current_phase":"handoff"}' --json`
+  - Marks the workflow ready for the skill-tool chain guard.
+- `skc state voyage handoff --to <blueprint|sonar> --json`
+  - Bridge command run in-process by the skill tool after slash-skill dispatch.
+
+Examples:
+- handoff state write:
+```
+skc state voyage write --input '{"current_phase":"handoff"}' --json
+```
+
+Aliases and bridges:
+- voyage -> blueprint|sonar: `skc state voyage handoff --to <blueprint|sonar> --json`
+<!-- skc:cmdref:end state -->
 ## Handoff back to planning
 
 When the aggregate ultragoal is complete OR the user requests return to planning/clarification, mark ultragoal ready for handoff so the skill tool's chain guard permits the backward transition:
@@ -434,5 +454,5 @@ The skill tool then dispatches `/skill:ralplan` or `/skill:deep-interview` same-
 - Never call `goal({"op":"complete"})` unless the aggregate run or legacy per-story goal is actually complete.
 - In aggregate mode, intermediate and final story checkpoints update durable `goals.json` state and append receipt proof to `ledger.jsonl`; the final story checkpoint creates the final aggregate receipt before the agent may call `goal({"op":"complete"})`.
 - Completion checkpoints require `--quality-gate-json` only. Shell commands and hooks must not mutate goal state; the agent reconciles inline goal-tool state after durable completion.
-- Final-aggregate completion additionally requires a `criticReview` `OKAY`; a `human_blocked` pause additionally requires a fresh `OKAY` `critic_verdict` receipt.
+- Final-aggregate completion additionally requires a `signoff` `OKAY`; a `human_blocked` pause additionally requires a fresh `OKAY` `critic_verdict` receipt.
 - Treat `ledger.jsonl` as the durable audit trail; checkpoint after every success or failure.

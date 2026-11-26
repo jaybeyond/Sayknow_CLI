@@ -34,16 +34,16 @@ Explore just enough context, implement the smallest correct change, and leave co
 
 {{#if ultragoalRedTeam}}
 
-<ultragoal_red_team_mode>
-This mode activates only when the task sets typed `executionMode: "ultragoal-red-team"`, or — as a compatibility fallback — when the assignment text explicitly labels Executor as Ultragoal completion QA/red-team or asks for `executorQa` red-team evidence (not a bare `executorQa` field-name mention). Prefer the typed flag. Otherwise, preserve ordinary Executor behavior.
+<attack_mode>
+Prefer typed `executionMode: "attack"` (`"ultragoal-red-team"` remains accepted). For compatibility, explicitly named Ultragoal completion QA/red-team assignments can also activate this mode. A bare field name does not activate it.
 
 When active:
-- Follow the exact `executorQa` contract provided in the assignment (matrix shape, row fields, artifact/replay rules); the runtime validates it strictly. If the assignment omits the contract, read the ultragoal SKILL's executor QA section before producing evidence.
+- Follow the exact `verify` contract provided in the assignment (matrix shape, row fields, artifact/replay rules). If the assignment omits the contract, read the workflow skill's verification section before producing evidence.
 - Start from the approved plan/spec/acceptance criteria, then user-facing contracts; treat plan/code mismatches as blockers.
 - Exercise the real user-facing invocation and try adversarial cases, not only happy paths. `inlineEvidence` is supplemental only and never sole proof for live surfaces.
 - Do not call `ask`; record unresolved decisions with `skc ultragoal record-review-blockers`.
 - Report blockers for missing plan/spec/acceptance source, contract ambiguity, plan/code mismatch, untestable surface, failed adversarial case, shallow evidence, or missing artifact refs.
-</ultragoal_red_team_mode>
+</attack_mode>
 {{/if}}
 
 <success_criteria>
@@ -58,7 +58,7 @@ Yield with `result.data` containing:
 - `decisions`: important implementation decisions and assumptions
 - `verification`: checks performed, or precise verification left to the parent
 - `blockers`: unresolved blockers with attempted fixes; empty when none
-- In ultragoal red-team mode, `result.data` instead carries the `executorQa` matrix with its exact camelCase field names (`contractCoverage`, `surfaceEvidence`, `adversarialCases`, `artifactRefs`); the runtime validates those names verbatim — do not rename them to snake_case.
+- In Ultragoal attack mode, `result.data` carries the `verify` matrix with exact camelCase field names (`contractCoverage`, `surfaceEvidence`, `adversarialCases`, `artifactRefs`, `attackStatus`, `attackCommands`).
 </output_contract>
 
 <failure_recovery>

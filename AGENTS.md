@@ -8,10 +8,10 @@ SKC intentionally exposes exactly four default workflow skills. Do not add, docu
 
 | Workflow skill | Purpose | Bundled source file |
 | --- | --- | --- |
-| `deep-interview` | Socratic requirements interview; writes approved specs under `.skc/specs/`. | `packages/coding-agent/src/defaults/skc/skills/deep-interview/SKILL.md` |
-| `ralplan` | Consensus planning and approval gate; writes plans under `.skc/plans/`. | `packages/coding-agent/src/defaults/skc/skills/ralplan/SKILL.md` |
-| `ultragoal` | Durable multi-goal execution ledger under `.skc/ultragoal/`. | `packages/coding-agent/src/defaults/skc/skills/ultragoal/SKILL.md` |
-| `team` | Tmux-backed parallel execution using `.skc/state/team/`. | `packages/coding-agent/src/defaults/skc/skills/team/SKILL.md` |
+| `sonar` | Socratic requirements interview; writes approved specs under `.skc/specs/`. | `packages/coding-agent/src/defaults/skc/skills/deep-interview/SKILL.md` |
+| `blueprint` | Consensus planning and approval gate; writes plans under `.skc/plans/`. | `packages/coding-agent/src/defaults/skc/skills/ralplan/SKILL.md` |
+| `voyage` | Durable multi-goal execution ledger under `.skc/ultragoal/`. | `packages/coding-agent/src/defaults/skc/skills/ultragoal/SKILL.md` |
+| `octo` | Tmux-backed parallel execution using `.skc/state/team/`. | `packages/coding-agent/src/defaults/skc/skills/team/SKILL.md` |
 
 | Role agent | Purpose | Bundled source file |
 | --- | --- | --- |
@@ -27,6 +27,7 @@ Rules:
 - Do not commit repo-visible `.skc` default definitions; runtime user/project `.skc` discovery remains supported for local overrides and installed configs.
 - Runtime state, plans, specs, and workflow ledgers belong under `.skc/`.
 - Preserve upstream attribution in source comments/docs where appropriate, but public commands, paths, and examples must use `skc` and `.skc`.
+- `deep-interview`, `ralplan`, `ultragoal`, and `team` are retained internal workflow IDs and direct invocation aliases, not additional public workflows.
 - Keep source-bundled workflow skills and role agents in sync with tests/gates; do not rely on committed `.skc` copies.
 
 ## Workflow routing

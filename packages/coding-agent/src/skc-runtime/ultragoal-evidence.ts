@@ -728,7 +728,7 @@ export async function validateReplayExemptFallback(
 			throw new Error(`qualityGate ${fieldName}.replayExempt fallback must not reference the replay record itself`);
 		}
 		const fallback = artifactRefs.get(fallbackRef)!;
-		if (await validateStructuralArtifact(cwd, fallback, `executorQa.artifactRefs.${fallbackRef}`, options))
+		if (await validateStructuralArtifact(cwd, fallback, `verify.artifactRefs.${fallbackRef}`, options))
 			validFallback = true;
 	}
 	if (!validFallback)
@@ -812,13 +812,11 @@ export async function validateLiveSurfaceProofPresence(
 ): Promise<void> {
 	if (!isLiveSurfaceFamily(family)) return;
 	for (const artifactId of artifactIds) {
-		if (
-			await hasLiveProofPresence(cwd, artifactRefs.get(artifactId)!, `executorQa.artifactRefs.${artifactId}`, family)
-		)
+		if (await hasLiveProofPresence(cwd, artifactRefs.get(artifactId)!, `verify.artifactRefs.${artifactId}`, family))
 			return;
 	}
 	throw new Error(
-		`qualityGate ${artifactIds.map(id => `executorQa.artifactRefs.${id}`).join(", ")} must reference a live proof artifact, structural capture, or CLI replay; inlineEvidence and typed verifiedReceipt do not prove live surfaces`,
+		`qualityGate ${artifactIds.map(id => `verify.artifactRefs.${id}`).join(", ")} must reference a live proof artifact, structural capture, or CLI replay; inlineEvidence and typed verifiedReceipt do not prove live surfaces`,
 	);
 }
 export async function validateSurfaceStructuralRequirement(
@@ -836,7 +834,7 @@ export async function validateSurfaceStructuralRequirement(
 		const artifact = artifactRefs.get(artifactId)!;
 		const kind = structuralArtifactKind(artifact);
 		if (!kind) continue;
-		const valid = await validateStructuralArtifact(cwd, artifact, `executorQa.artifactRefs.${artifactId}`, {
+		const valid = await validateStructuralArtifact(cwd, artifact, `verify.artifactRefs.${artifactId}`, {
 			surfaceFamily: family,
 			live: true,
 		});

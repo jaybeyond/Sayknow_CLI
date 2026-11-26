@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.7.27] - 2026-11-26
+
+- The composer no longer shows clickable Attach and Send buttons. Keyboard submission, `@` file completion, and clipboard paste are unchanged.
+- The welcome screen omits empty recent sessions and keeps model selection guidance on one row. The default status line prioritizes the active model and workspace, and fallback notices give the reason. Successful shell, evaluation, and file-search results fold to one preview row until expanded.
+- Tool output expansion hints now use the configured shortcut and interface language, and disappear when the shortcut is unbound.
+- The interactive update notice uses one row, with no border or extra blank line.
+- Frontend design routing supplies demo and source links for relevant DesignBookmark Motion examples, so the agent can read and adapt a selected example on demand without adding a skill or bundling demo code.
+- The four built-in workflows are now Sonar, Blueprint, Octo, and Voyage in command discovery. Existing command names and stored workflow IDs still work.
+- Voyage accepts `review`, `verify`, `rerun`, `signoff`, `batchDeferred`, and `batchClose` in gate input, plus `--batch-json`, `--verify-json`, and executor `attack` mode. Legacy spellings still work. Gate receipts and Sonar state continue to write legacy keys. Default updates install renamed internal fragments alongside existing copies.
+- Before switching to an automatically selected provider at turn start, retry an inconclusive credential lookup for the configured primary model once. If credentials still cannot be obtained, keep the primary selected and report the error. Explicit fallback chains and confirmed usage-limit fallback still work.
+
 ## [0.7.26] - 2026-11-24
 
 ### Added

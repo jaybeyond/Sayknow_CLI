@@ -5,6 +5,7 @@ import { parseRateLimitReason } from "@sayknow-cli/ai";
 import { type Component, Loader, TERMINAL, Text } from "@sayknow-cli/tui";
 import { logger } from "@sayknow-cli/utils";
 import { settings } from "../../config/settings";
+import { t } from "../../i18n";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import {
 	ReadToolGroupComponent,
@@ -23,6 +24,7 @@ import type { AgentSessionEvent } from "../../session/agent-session";
 import { type CustomMessage, isSilentAbort, readPendingDisplayTag } from "../../session/messages";
 import { transferSessionMessageIdentity } from "../../session/session-manager";
 import type { ResolveToolDetails } from "../../tools/resolve";
+import { sanitizeStatusLineText } from "../../tui";
 import { computeIrcSplitWidths, getIrcSidebarSemanticToken } from "../components/irc-sidebar";
 import type { IrcObservationRecord } from "../irc-observation-ledger";
 import { interruptHint } from "../shared";
@@ -552,7 +554,13 @@ export class EventController {
 	async #handleModelFallbackSwitched(
 		event: Extract<AgentSessionEvent, { type: "model_fallback_switched" }>,
 	): Promise<void> {
-		this.ctx.showStatus(`Fallback model: ${event.from} → ${event.to}`);
+		const reason =
+			event.reason === "quota" || event.reason === "auth" || event.reason === "resolution"
+				? t(`fallback.reason.${event.reason}`)
+				: event.reason === "new_turn"
+					? t("fallback.reason.newTurn")
+					: t("fallback.reason.other");
+		this.ctx.showStatus(`${sanitizeStatusLineText(event.from)} → ${sanitizeStatusLineText(event.to)} · ${reason}`);
 		this.ctx.statusLine.invalidate();
 		this.ctx.updateEditorBorderColor();
 	}

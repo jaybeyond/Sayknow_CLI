@@ -10,6 +10,7 @@
 import { type Component, Container, Loader, Spacer, Text, type TUI } from "@sayknow-cli/tui";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import { formatTruncationMetaNotice, type TruncationMeta } from "../../tools/output-meta";
+import { formatExpandHint } from "../../tools/render-utils";
 import { DynamicBorder } from "./dynamic-border";
 import { truncateToVisualLines } from "./visual-truncate";
 
@@ -76,7 +77,9 @@ export function buildStatusFooter(opts: {
 	const parts: string[] = [];
 
 	if (opts.hiddenLineCount > 0 && !opts.suppressHiddenCount) {
-		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines (ctrl+o to expand)`));
+		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines`));
+		const hint = formatExpandHint(theme);
+		if (hint) parts.push(hint);
 	}
 	if (opts.status === "cancelled") {
 		parts.push(theme.fg("warning", "(cancelled)"));

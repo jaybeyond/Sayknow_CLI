@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { type Agent, type AgentMessage, ThinkingLevel } from "@sayknow-cli/agent-core";
 import type { CompactionOutcome } from "@sayknow-cli/agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, UsageReport } from "@sayknow-cli/ai";
-import type { Component, EditorAction, EditorTheme, SlashCommand } from "@sayknow-cli/tui";
+import type { Component, EditorTheme, SlashCommand } from "@sayknow-cli/tui";
 import {
 	Container,
 	clearRenderCache,
@@ -59,7 +59,7 @@ import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "..
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import type { CommandPaletteAction } from "./components/command-palette";
-import { COMPOSER_ACTION, CustomEditor } from "./components/custom-editor";
+import { CustomEditor } from "./components/custom-editor";
 import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
@@ -160,25 +160,6 @@ export function getComposerPlaceholder(
 	return buildComposerPlaceholder(keybindings, context, options);
 }
 
-/**
- * The composer's clickable rail: Attach starts an `@` file reference (the same
- * mention that attaches files and images), and the primary action names what the
- * submit key does right now, with that key.
- */
-export function getComposerActions(
-	keybindings: Pick<KeybindingsManager, "getDisplayString">,
-	context: KeyDisplayContext,
-	options: { readonly busy: boolean; readonly busyPromptMode: "steer" | "queue" },
-): EditorAction[] {
-	const submitKey = keybindings.getDisplayString("tui.input.submit", context);
-	const verb = t(
-		options.busy ? (options.busyPromptMode === "steer" ? "composer.steer" : "composer.queue") : "composer.send",
-	);
-	return [
-		{ id: COMPOSER_ACTION.attach, label: `@ ${t("composer.attach")}` },
-		{ id: COMPOSER_ACTION.send, label: submitKey ? `${submitKey} ${verb}` : verb, primary: true },
-	];
-}
 const WELCOME_RESERVED_CONTAINER_CHILD_LIMIT = 8;
 const COMPOSER_RIGHT_GUTTER_WIDTH = 1;
 
@@ -780,6 +761,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					skipLogoAnimation,
 					resumeKey: this.keybindings.getKeys("app.session.resume")[0],
 					continueKey: this.keybindings.getKeys("app.session.continue")[0],
+					modelKey: this.keybindings.getKeys("app.model.select")[0] ?? null,
 					onOpenSession: session => void this.#openWelcomeSession(session),
 					onShowAllSessions: () => this.showSessionSelector(),
 				},
@@ -1193,14 +1175,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.session.isStreaming || this.session.isCompacting;
 	}
 
-	/** Placeholder and action rail both describe what the submit key does now; refresh them together. */
+	/** Keep keyboard hints in sync with the current delivery mode. */
 	#applyComposerHints(editor: CustomEditor): void {
 		const options = {
 			busy: this.#isPromptDeliveryBusy(),
 			busyPromptMode: this.settings.get("busyPromptMode"),
 		} as const;
 		editor.setPlaceholder(getComposerPlaceholder(this.keybindings, this.#keyDisplayContext, options));
-		editor.setActions(getComposerActions(this.keybindings, this.#keyDisplayContext, options));
 	}
 
 	#getWelcomeReservedRows(width: number): number {

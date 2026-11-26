@@ -22,6 +22,7 @@ export const ja: Partial<Record<MsgKey, string>> = {
 	"composer.steer": "指示",
 	"composer.queue": "キュー",
 	"composer.newLine": "改行",
+	"tools.expandHint": "展開",
 	"settings.title": "設定",
 	"settings.preview": "プレビュー:",
 	"settings.tabCycle": "Tab で切替",

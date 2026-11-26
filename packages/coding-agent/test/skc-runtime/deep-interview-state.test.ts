@@ -104,6 +104,38 @@ describe("deep-interview-state: mergeDeepInterviewRounds", () => {
 });
 
 describe("deep-interview-state: mergeDeepInterviewEnvelope", () => {
+	it("accepts branded state fields while preserving the legacy disk shape", () => {
+		const incoming = {
+			research_rounds: [1],
+			state: { autofill_rounds: [2], autofill_streak: 1, panel_reviews: [{ round: 2 }], panel_failures: 3 },
+		};
+		const merged = mergeDeepInterviewEnvelope({}, incoming);
+		expect(merged.research_rounds).toBeUndefined();
+		expect(inner(merged)).toEqual({
+			rounds: [],
+			established_facts: [],
+			auto_researched_rounds: [1],
+			auto_answered_rounds: [2],
+			auto_answer_streak: 1,
+			lateral_reviews: [{ round: 2 }],
+			lateral_panel_failures: 3,
+		});
+		expect(incoming.state.autofill_rounds).toEqual([2]);
+	});
+
+	it("repairs duplicate stored aliases but rejects a mixed authored update", () => {
+		const stored = {
+			autofill_rounds: [2, 3],
+			state: { auto_answered_rounds: [1, 2], auto_answer_streak: 1, autofill_streak: 2 },
+		};
+		const merged = inner(mergeDeepInterviewEnvelope(stored, { state: {} }));
+		expect(merged.auto_answered_rounds).toEqual([1, 2, 3]);
+		expect(merged.auto_answer_streak).toBe(2);
+		expect(merged.autofill_streak).toBeUndefined();
+		expect(() => mergeDeepInterviewEnvelope({}, stored)).toThrow(
+			"deep-interview state has both auto_answered_rounds and autofill_rounds; use autofill_rounds only",
+		);
+	});
 	it("preserves existing rounds when an incoming partial state omits them", () => {
 		const existing = {
 			skill: "deep-interview",

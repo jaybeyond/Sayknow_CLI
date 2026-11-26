@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { readSignoff } from "./ultragoal-key-aliases";
 import type {
 	UltragoalCompletionVerification,
 	UltragoalGoal,
@@ -304,11 +305,7 @@ export function finalAggregateReceiptMissingCriticOkay(
 	if (receipt.receiptKind !== "final-aggregate") return false;
 	const event = findLedgerReceiptEvent(ledger, receipt);
 	if (!event) return false;
-	const gate = event.qualityGateJson;
-	if (typeof gate !== "object" || gate === null || Array.isArray(gate)) return true;
-	const criticReview = (gate as Record<string, unknown>).criticReview;
-	if (typeof criticReview !== "object" || criticReview === null || Array.isArray(criticReview)) return true;
-	return (criticReview as Record<string, unknown>).verdict !== "OKAY";
+	return readSignoff(event.qualityGateJson)?.verdict !== "OKAY";
 }
 
 export function validateReceiptFreshBase(input: {

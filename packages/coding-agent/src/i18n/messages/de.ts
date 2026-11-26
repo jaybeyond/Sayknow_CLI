@@ -25,6 +25,7 @@ export const de: Partial<Record<MsgKey, string>> = {
 	"composer.steer": "Lenken",
 	"composer.queue": "Warteschlange",
 	"composer.newLine": "Neue Zeile",
+	"tools.expandHint": "Ausklappen",
 	"settings.title": "Einstellungen",
 	"settings.preview": "Vorschau:",
 	"settings.tabCycle": "Tab wechselt",

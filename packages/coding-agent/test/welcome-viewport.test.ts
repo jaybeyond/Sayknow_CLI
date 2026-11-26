@@ -84,8 +84,21 @@ describe("launch card content", () => {
 		expect(unbound).toContain("/resume all sessions");
 
 		const empty = card({}, []).join("\n");
-		expect(empty).toContain("No saved sessions");
+		expect(empty).not.toContain("No saved sessions");
+		expect(empty).not.toContain("Recent sessions");
 		expect(empty).not.toContain("all sessions");
+	});
+
+	it("offers model selection once with the configured key and no empty sessions section", () => {
+		const lines = plain(
+			new WelcomeComponent("1.2.3", "Unknown", "Unknown", [], "ascii", {
+				modelKey: "ctrl+x",
+				keyDisplayContext: { platform: "linux" },
+			}).render(52),
+		);
+		expect(lines.filter(line => line.includes("Ctrl+X"))).toHaveLength(1);
+		expect(lines.join("\n")).toContain("choose a model · Ctrl+X");
+		expect(lines.join("\n")).not.toContain("Recent sessions");
 	});
 
 	it("names /resume instead of an Option chord on macOS, where Option may type a letter", () => {
@@ -167,7 +180,7 @@ describe("launch card layout", () => {
 	});
 
 	it("keeps the wordmark and drops whole metadata and hints at narrow widths", () => {
-		const ascii = plain(new WelcomeComponent("1.2.3", "m", "p", [], "ascii").render(100)).join("\n");
+		const ascii = plain(new WelcomeComponent("1.2.3", "m", "p", SESSIONS, "ascii").render(100)).join("\n");
 		expect(ascii).toMatch(/Recent sessions -{3,}/);
 		expect(ascii).not.toMatch(/[█▀▄╔╚─]/);
 		const narrow = card({ buildLabel: "a very long build label", continueKey: "ctrl+q" }, SESSIONS, 26);

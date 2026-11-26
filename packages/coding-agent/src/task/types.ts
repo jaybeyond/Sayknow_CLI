@@ -104,10 +104,10 @@ const createTaskItemSchema = (_contextEnabled: boolean) =>
 		description: z.string().describe("ui label, not seen by subagent"),
 		assignment: z.string().describe(assignmentDescription),
 		executionMode: z
-			.enum(["default", "ultragoal-red-team"])
+			.enum(["default", "attack", "ultragoal-red-team", "ultragoal_red_team"])
 			.optional()
 			.describe(
-				"typed executor mode: default keeps ordinary executor behavior; ultragoal-red-team injects the Ultragoal QA/red-team prompt fragment. Prefer this over free-form assignment text (#2698).",
+				"Typed executor mode: attack injects the Ultragoal verification prompt; ultragoal-red-team is its legacy alias. Default keeps ordinary executor behavior.",
 			),
 		specialty: z
 			.enum(TASK_MODEL_SPECIALTY_IDS)

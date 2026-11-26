@@ -20,7 +20,7 @@ import {
 	resolveOutputSinkHeadBytes,
 	stripOutputNotice,
 } from "./output-meta";
-import { formatTitle, replaceTabs, shortenPath, truncateToWidth, wrapBrackets } from "./render-utils";
+import { formatExpandHint, formatTitle, replaceTabs, shortenPath, truncateToWidth, wrapBrackets } from "./render-utils";
 import { ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -984,7 +984,7 @@ export const evalToolRenderer = {
 						const outputLines = [...outputContent.lines];
 						if (!expanded && outputContent.hiddenCount > 0) {
 							outputLines.push(
-								uiTheme.fg("dim", `… ${outputContent.hiddenCount} more lines (ctrl+o to expand)`),
+								`${uiTheme.fg("dim", `… ${outputContent.hiddenCount} more lines`)} ${formatExpandHint(uiTheme)}`,
 							);
 						}
 						if (statusLines.length > 0) {
@@ -1101,11 +1101,12 @@ export const evalToolRenderer = {
 				const outputLines: string[] = [];
 				if (cachedSkipped && cachedSkipped > 0) {
 					outputLines.push("");
-					const skippedLine = uiTheme.fg(
+					const summary = uiTheme.fg(
 						"dim",
-						`… (${cachedSkipped} earlier lines, showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length}) (ctrl+o to expand)`,
+						`… (${cachedSkipped} earlier lines, showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length})`,
 					);
-					outputLines.push(truncateToWidth(skippedLine, width));
+					const hint = formatExpandHint(uiTheme);
+					outputLines.push(truncateToWidth(hint ? `${summary} ${hint}` : summary, width));
 				}
 				outputLines.push(...cachedLines);
 				if (statusLines.length > 0) {

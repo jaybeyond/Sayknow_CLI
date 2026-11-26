@@ -143,7 +143,7 @@ describe("deep-interview ask clarification contract", () => {
 		expect(skill).toContain(
 			"call `ask` again with the exact original question, options, and `deepInterview.*` metadata",
 		);
-		expect(skill).toContain("bypasses Step 2b′ auto-answer, Step 2b″ free-text refine, Step 2c ambiguity scoring");
+		expect(skill).toContain("bypasses Step 2b′ autofill, Step 2b″ free-text refine, Step 2c ambiguity scoring");
 		expect(skill).toContain("must not be recorded as a round answer");
 	});
 });
@@ -162,7 +162,7 @@ describe("deep-interview ouroboros ooo-interview parity port", () => {
 		const steps = extractSection(skill, "Steps");
 		const cadence = steps.slice(
 			steps.indexOf("### Step 2f: Check Tiered Confirmation Cadence"),
-			steps.indexOf("## Phase 3: Lateral Review Panel"),
+			steps.indexOf("## Phase 3: Panel"),
 		);
 		expect(cadence).toMatch(/Hard cancellation/);
 		expect(cadence).toMatch(/stops immediately at any round/);
@@ -194,7 +194,7 @@ describe("deep-interview ouroboros ooo-interview parity port", () => {
 		const steps = extractSection(skill, "Steps");
 		const askStep = steps.slice(
 			steps.indexOf("### Step 2b: Ask the Question"),
-			steps.indexOf("### Step 2b′: Auto-Answer Opted-Out Questions"),
+			steps.indexOf("### Step 2b′: Autofill Opted-Out Questions"),
 		);
 		expect(askStep).toContain("**Standing early-exit option (every interview round, from round 1).**");
 		expect(askStep).toContain(
@@ -204,7 +204,7 @@ describe("deep-interview ouroboros ooo-interview parity port", () => {
 		expect(askStep).toMatch(/never mark it as the recommended option/);
 		// Gates that are not interview rounds keep their own fixed option sets.
 		expect(askStep).toMatch(
-			/not offered on the Round 0 topology gate, the Phase 4b Restate gate, the auto-answer threshold-crossing confirmation, or the Phase 5 execution gate/,
+			/not offered on the Round 0 topology gate, the Phase 4b Restate gate, the autofill threshold-crossing confirmation, or the Phase 5 execution gate/,
 		);
 		// Selecting it is an early proceed: recorded, warned, then crystallized.
 		expect(askStep).toMatch(/not a round answer and not a hard cancellation/);

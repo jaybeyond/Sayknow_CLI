@@ -306,6 +306,7 @@ export const WORKFLOW_MANIFEST: Record<CanonicalSkcWorkflowSkill, SkillManifest>
 				enumValues: ["aggregate", "per-story"],
 				appliesToVerbs: ["create-goals"],
 			},
+			{ name: "batch-json", type: "string", appliesToVerbs: ["create-goals"] },
 			{ name: "validation-batch-json", type: "string", appliesToVerbs: ["create-goals"] },
 			{ name: "retry-failed", type: "boolean", appliesToVerbs: ["complete-goals"] },
 			{ name: "goal-id", type: "string", required: true, appliesToVerbs: ["checkpoint", "record-review-blockers"] },
@@ -438,6 +439,9 @@ export const WORKFLOW_MANIFEST: Record<CanonicalSkcWorkflowSkill, SkillManifest>
 			{ name: "pr", type: "string", appliesToVerbs: ["review"] },
 			{ name: "branch", type: "string", appliesToVerbs: ["review"] },
 			{ name: "spec", type: "string", appliesToVerbs: ["review"] },
+			{ name: "verify-json", type: "string", appliesToVerbs: ["review"] },
+			{ name: "verify", type: "string", appliesToVerbs: ["review"] },
+			{ name: "executor-qa", type: "string", appliesToVerbs: ["review"] },
 			{ name: "executor-qa-json", type: "string", appliesToVerbs: ["review"] },
 			{
 				name: "mode",

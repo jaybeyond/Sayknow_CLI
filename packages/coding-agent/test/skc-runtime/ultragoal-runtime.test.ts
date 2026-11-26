@@ -15,6 +15,7 @@ import {
 	validateCompletionReceipt,
 	verifyUltragoalDurableCompletionState,
 } from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-guard";
+import { normalizeQualityGateInput } from "@sayknow-cli/coding-agent/skc-runtime/ultragoal-key-aliases";
 
 import {
 	addUltragoalSubgoal,
@@ -994,27 +995,23 @@ describe("native SKC ultragoal runtime", () => {
 		expect(receipt).not.toHaveProperty("goals");
 	});
 
-	it("validation batch: accepts valid --validation-batch-json and persists validationBatch on all members", async () => {
+	it.each(["--batch-json", "--validation-batch-json"])("persists legacy validationBatch using %s", async flag => {
 		const root = await tempDir();
 		const metadata = JSON.stringify([
 			{ schemaVersion: 1, batchId: "VB001", memberIds: ["G003", "G001", "G002"], finalGoalId: "G003" },
 		]);
 
 		const create = await runNativeUltragoalCommand(
-			[
-				"create-goals",
-				"--brief",
-				"@goal: A\na\n@goal: B\nb\n@goal: C\nc",
-				"--validation-batch-json",
-				metadata,
-				"--json",
-			],
+			["create-goals", "--brief", "@goal: A\na\n@goal: B\nb\n@goal: C\nc", flag, metadata, "--json"],
 			root,
 		);
 		const plan = await readUltragoalPlan(root);
 		const batches = plan?.goals.map(goal => goal.validationBatch);
 
 		expect(create.status).toBe(0);
+		const persisted = await Bun.file(JSON.parse(create.stdout ?? "{}").goals_path).json();
+		expect(persisted.goals[0]).toHaveProperty("validationBatch.batchId", "VB001");
+		expect(persisted.goals[0]).not.toHaveProperty("batch");
 		expect(batches).toHaveLength(3);
 		expect(batches?.every(batch => batch !== undefined)).toBe(true);
 		expect(batches?.map(batch => batch?.memberIds)).toEqual([
@@ -1025,6 +1022,51 @@ describe("native SKC ultragoal runtime", () => {
 		expect(batches?.map(batch => batch?.finalGoalId)).toEqual(["G003", "G003", "G003"]);
 		expect(new Set(batches?.map(batch => batch?.metadataHash))).toHaveProperty("size", 1);
 		expect(batches?.[0]).toMatchObject({ schemaVersion: 1, batchId: "VB001", mode: "aggregate-only" });
+	});
+
+	it("accepts a brief beginning with front matter and a batch option", async () => {
+		const root = await tempDir();
+		const brief = "---\ntitle: Example\n---\n@goal: A\na\n@goal: B\nb";
+		const batch = JSON.stringify([
+			{ schemaVersion: 1, batchId: "VB001", memberIds: ["G001", "G002"], finalGoalId: "G002" },
+		]);
+		const result = await runNativeUltragoalCommand(["create-goals", "--brief", brief, "--batch-json", batch], root);
+		expect(result.status).toBe(0);
+		const plan = await readUltragoalPlan(root);
+		expect(plan?.brief).toBe(brief);
+		expect(plan?.goals[0]?.validationBatch?.batchId).toBe("VB001");
+	});
+
+	it.each(["--retry", "--json=foo", "--json"])("keeps literal checkpoint evidence %s", async evidence => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Compatibility fixture" });
+		const result = await runNativeUltragoalCommand(
+			["checkpoint", "--goal-id", "G001", "--status", "blocked", "--evidence", evidence],
+			root,
+		);
+		expect(result.status).toBe(0);
+		expect((await readUltragoalPlan(root))?.goals[0]).toMatchObject({ status: "blocked", evidence });
+	});
+
+	it("rejects ambiguous batch arguments before creating a plan", async () => {
+		const brief = "@goal: A\na\n@goal: B\nb";
+		const batch = JSON.stringify([
+			{ schemaVersion: 1, batchId: "VB001", memberIds: ["G001", "G002"], finalGoalId: "G002" },
+		]);
+		for (const [args, error] of [
+			[["--brief-file", "--batch-json", batch], "--brief-file requires a value"],
+			[["--brief-file", "--from-stdin"], "--brief-file requires a value"],
+			[
+				["--batch-json", batch, "--validation-batch-json", batch],
+				"has both --batch-json and --validation-batch-json",
+			],
+		] as const) {
+			const root = await tempDir();
+			const result = await runNativeUltragoalCommand(["create-goals", "--brief", brief, ...args], root);
+			expect(result.status).toBe(1);
+			expect(result.stderr).toContain(error);
+			expect(await readUltragoalPlan(root)).toBeNull();
+		}
 	});
 
 	it("validation batch: rejects per-story mode", async () => {
@@ -1199,8 +1241,8 @@ describe("native SKC ultragoal runtime", () => {
 				}),
 			).rejects.toThrow(
 				"rerunCommands" in patch
-					? "deferredToBatch.iteration.rerunCommands must be non-empty"
-					: "deferredToBatch.iteration must pass with fullRerun true",
+					? "batchDeferred.rerun.rerunCommands must be non-empty"
+					: "batchDeferred.rerun must pass with fullRerun true",
 			);
 			expect([await goals.text(), await ledger.text()]).toEqual(before);
 		}
@@ -1289,12 +1331,29 @@ describe("native SKC ultragoal runtime", () => {
 			],
 		});
 		await startNextUltragoalGoal({ cwd: root });
+		const legacyDeferred = JSON.parse(deferredBatchGate("G001", plan.goals[0]!.validationBatch!));
+		const brandedDeferred = normalizeQualityGateInput(legacyDeferred).gate;
+		await expect(
+			checkpointUltragoalGoal({
+				cwd: root,
+				goalId: "G001",
+				status: "complete",
+				evidence: "malformed lanes",
+				qualityGateJson: JSON.stringify({
+					batchDeferred: {
+						...(brandedDeferred.batchDeferred as Record<string, unknown>),
+						deferredLanes: ["review,verify"],
+					},
+				}),
+			}),
+		).rejects.toThrow("batchDeferred.deferredLanes must be review and verify");
+		legacyDeferred.deferredToBatch.deferredLanes = [" architectReview ", "\texecutorQa"];
 		plan = await checkpointUltragoalGoal({
 			cwd: root,
 			goalId: "G001",
 			status: "complete",
 			evidence: "g001 deferred",
-			qualityGateJson: deferredBatchGate("G001", plan.goals[0]!.validationBatch!),
+			qualityGateJson: JSON.stringify(legacyDeferred),
 		});
 		await startNextUltragoalGoal({ cwd: root });
 		const goalsPath = path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json");
@@ -1317,7 +1376,9 @@ describe("native SKC ultragoal runtime", () => {
 			goalId: "G002",
 			status: "complete",
 			evidence: "g002 same cumulative path",
-			qualityGateJson: deferredBatchGate("G002", plan.goals[1]!.validationBatch!),
+			qualityGateJson: JSON.stringify(
+				normalizeQualityGateInput(JSON.parse(deferredBatchGate("G002", plan.goals[1]!.validationBatch!))).gate,
+			),
 		});
 		await startNextUltragoalGoal({ cwd: root });
 		plan = await checkpointUltragoalGoal({
@@ -1325,9 +1386,18 @@ describe("native SKC ultragoal runtime", () => {
 			goalId: "G003",
 			status: "complete",
 			evidence: "batch close",
-			qualityGateJson: batchCloseGate(plan),
+			qualityGateJson: JSON.stringify(normalizeQualityGateInput(JSON.parse(batchCloseGate(plan))).gate),
 		});
 		const ledger = await readUltragoalLedger(root);
+		const savedGates = ledger
+			.filter(event => event.event === "goal_checkpointed")
+			.map(event => event.qualityGateJson);
+		expect(savedGates[1]).toMatchObject({
+			deferredToBatch: { kind: "validation-batch-deferred", deferredLanes: ["architectReview", "executorQa"] },
+		});
+		expect(savedGates[2]).toMatchObject({
+			validationBatchClose: { kind: "validation-batch-close", unionChangeSet: { source: "validation-batch" } },
+		});
 		expect(plan.goals[2]!.completionVerification?.validationBatch?.role).toBe("batch-close");
 		expect(plan.goals[0]!.completionVerification?.validationBatch?.role).toBe("deferred-member");
 		expect(
@@ -2433,6 +2503,85 @@ describe("native SKC ultragoal runtime", () => {
 		});
 		expect(receipt.quality_gate_hash).toEqual(expect.any(String));
 		expect(receipt).not.toHaveProperty("goals");
+		expect(receipt.legacy_keys_normalized).toEqual(
+			expect.arrayContaining([
+				"architectReview->review",
+				"executorQa->verify",
+				"iteration->rerun",
+				"criticReview->signoff",
+			]),
+		);
+		expect(result.stderr).toContain("legacy quality-gate names accepted");
+		const stored = (await readUltragoalLedger(root)).find(row => row.event === "goal_checkpointed");
+		expect(stored).not.toHaveProperty("legacy_keys_normalized");
+	});
+
+	it("accepts a branded gate, hashes the legacy ledger shape, and rejects mixed keys without writes", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		const raw = JSON.parse(await passingLiveQualityGate(root));
+		const { gate } = normalizeQualityGateInput(raw);
+		const directory = sessionUltragoalDir(root, TEST_SESSION_ID);
+		const paths = ["goals.json", "ledger.jsonl"].map(name => path.join(directory, name));
+		const before = await Promise.all(paths.map(name => Bun.file(name).text()));
+		const checkpoint = (qualityGate: unknown) =>
+			runNativeUltragoalCommand(
+				[
+					"checkpoint",
+					"--goal-id",
+					"G001",
+					"--status",
+					"complete",
+					"--evidence",
+					"tests passed",
+					"--quality-gate-json",
+					JSON.stringify(qualityGate),
+					"--json",
+				],
+				root,
+			);
+		const rejected = await checkpoint({ ...gate, architectReview: raw.architectReview });
+		expect(rejected.status).toBe(1);
+		expect(rejected.stderr).toContain("has both architectReview and review");
+		expect(await Promise.all(paths.map(name => Bun.file(name).text()))).toEqual(before);
+		const accepted = await checkpoint(gate);
+		expect(accepted.status).toBe(0);
+		expect(accepted.stderr).toBeUndefined();
+		const event = (await readUltragoalLedger(root)).find(row => row.event === "goal_checkpointed");
+		expect(event?.qualityGateJson).toEqual(raw);
+		expect(JSON.parse(accepted.stdout ?? "{}").quality_gate_hash).toBe(hashStructuredValue(raw));
+		const completed = await Promise.all(paths.map(name => Bun.file(name).text()));
+		const replay = await checkpoint({ ...gate, architectReview: raw.architectReview });
+		expect(replay.status).toBe(1);
+		expect(replay.stderr).toContain("has both architectReview and review");
+		expect((await checkpoint(gate)).status).toBe(0);
+		expect(await Promise.all(paths.map(name => Bun.file(name).text()))).toEqual(completed);
+
+		// A future writer hashes its stored gate object, not the normalized legacy shape.
+		const futureHash = hashStructuredValue(gate);
+		const savedPlan = JSON.parse(completed[0]!);
+		savedPlan.goals[0].completionVerification.qualityGateHash = futureHash;
+		const futurePlan = `${JSON.stringify(savedPlan, null, 2)}\n`;
+		const futureRows = completed[1]!
+			.trimEnd()
+			.split("\n")
+			.map(line => {
+				const row = JSON.parse(line);
+				if (row.event === "goal_checkpointed") {
+					row.qualityGateJson = gate;
+					row.completionVerification.qualityGateHash = futureHash;
+				}
+				return JSON.stringify(row);
+			});
+		const futureLedger = `${futureRows.join("\n")}\n`;
+		await Bun.write(paths[0]!, futurePlan);
+		await Bun.write(paths[1]!, futureLedger);
+		expect((await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID })).state).toBe(
+			"active_verified_complete",
+		);
+		expect((await checkpoint(gate)).status).toBe(0);
+		expect(await Promise.all(paths.map(name => Bun.file(name).text()))).toEqual([futurePlan, futureLedger]);
 	});
 
 	it("prints checkpoint-specific help with receipt guidance", async () => {
@@ -2441,7 +2590,7 @@ describe("native SKC ultragoal runtime", () => {
 		const result = await runNativeUltragoalCommand(["checkpoint", "--help"], root);
 
 		expect(result.status).toBe(0);
-		expect(result.stdout).toContain("skc ultragoal checkpoint --goal-id");
+		expect(result.stdout).toContain("skc voyage checkpoint --goal-id");
 		expect(result.stdout).toContain("--quality-gate-json");
 		expect(result.stdout).toContain("COMPLETE CHECKPOINT RECEIPTS");
 		expect(result.stdout).toContain("obligation");
@@ -2455,7 +2604,8 @@ describe("native SKC ultragoal runtime", () => {
 
 		expect(topLevel.status).toBe(0);
 		expect(topLevel.stdout).toContain("classify-blocker");
-		expect(topLevel.stdout).toContain("skc ultragoal classify-blocker --help");
+		expect(topLevel.stdout).toContain("skc voyage classify-blocker --help");
+		expect(topLevel.stdout).not.toContain("skc ultragoal <command>");
 		expect(commandSpecific.status).toBe(0);
 		expect(commandSpecific.stdout).toContain("--classification <human_blocked|resolvable>");
 		expect(commandSpecific.stdout).toContain("--evidence <text>");
@@ -3446,6 +3596,51 @@ describe("native SKC ultragoal runtime", () => {
 		return plan;
 	}
 
+	it("reads forward batch metadata and receipt aliases without rewriting the run", async () => {
+		const root = await batchTempDir();
+		const plan = await completedValidationBatchPlan(root);
+		const dir = sessionUltragoalDir(root, TEST_SESSION_ID);
+		const goals = Bun.file(path.join(dir, "goals.json"));
+		const log = Bun.file(path.join(dir, "ledger.jsonl"));
+		const moveBatch = (record: Record<string, unknown>) => {
+			if (!Object.hasOwn(record, "validationBatch")) return;
+			record.batch = record.validationBatch;
+			delete record.validationBatch;
+		};
+		const saved = await goals.json();
+		for (const goal of saved.goals) {
+			moveBatch(goal);
+			moveBatch(goal.completionVerification);
+		}
+		const rows = (await log.text())
+			.trimEnd()
+			.split("\n")
+			.map(line => {
+				const row = JSON.parse(line);
+				if (row.completionVerification) moveBatch(row.completionVerification);
+				return JSON.stringify(row);
+			});
+		const planBytes = `${JSON.stringify(saved)}\n`;
+		const ledgerBytes = `${rows.join("\n")}\n`;
+		await Bun.write(goals.name!, planBytes);
+		await Bun.write(log.name!, ledgerBytes);
+		expect((await verifyUltragoalDurableCompletionState({ cwd: root, sessionId: TEST_SESSION_ID })).state).toBe(
+			"active_verified_complete",
+		);
+		const replayed = await checkpointUltragoalGoal({
+			cwd: root,
+			goalId: "G003",
+			status: "complete",
+			evidence: "batch close",
+			qualityGateJson: batchCloseGate(plan),
+		});
+		expect(replayed.goals[2]?.completionVerification?.receiptId).toBe(
+			plan.goals[2]?.completionVerification?.receiptId,
+		);
+		expect(await Bun.file(goals.name!).text()).toBe(planBytes);
+		expect(await Bun.file(log.name!).text()).toBe(ledgerBytes);
+	});
+
 	it("keeps per-goal deferred receipts when replaying a context-staled validation batch member", async () => {
 		const root = await batchTempDir();
 		const plan = await completedValidationBatchPlan(root);
@@ -3892,7 +4087,7 @@ describe("native SKC ultragoal runtime", () => {
 			).rejects.toThrow(
 				"rerunCommands" in patch
 					? "rerunCommands must be a non-empty string array"
-					: "iteration must be passed with fullRerun true",
+					: "rerun must be passed with fullRerun true",
 			);
 			expect([await goals.text(), await ledger.text()]).toEqual(before);
 		}
@@ -3952,7 +4147,7 @@ describe("native SKC ultragoal runtime", () => {
 		);
 
 		expect(result.status).toBe(1);
-		expect(result.stderr).toContain("architectReview.commands");
+		expect(result.stderr).toContain("review.commands");
 		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text()).toBe(
 			beforeGoals,
 		);
@@ -4001,9 +4196,9 @@ describe("native SKC ultragoal runtime", () => {
 		);
 
 		expect(missingEvidence.status).toBe(1);
-		expect(missingEvidence.stderr).toContain("architectReview.evidence");
+		expect(missingEvidence.stderr).toContain("review.evidence");
 		expect(dirtyBlockers.status).toBe(1);
-		expect(dirtyBlockers.stderr).toContain("executorQa.blockers");
+		expect(dirtyBlockers.stderr).toContain("verify.blockers");
 		expect(await Bun.file(path.join(sessionUltragoalDir(root, TEST_SESSION_ID), "goals.json")).text()).toBe(
 			beforeGoals,
 		);
@@ -4026,8 +4221,8 @@ describe("native SKC ultragoal runtime", () => {
 		const missingMatrixError = await expectRejectedCompleteGate(root, created, missingMatrix);
 		const emptyMatrixError = await expectRejectedCompleteGate(root, created, emptyMatrix);
 
-		expect(missingMatrixError).toContain("executorQa.contractCoverage");
-		expect(emptyMatrixError).toContain("executorQa.surfaceEvidence");
+		expect(missingMatrixError).toContain("verify.contractCoverage");
+		expect(emptyMatrixError).toContain("verify.surfaceEvidence");
 	});
 
 	it("explains that contract coverage descriptions do not replace obligations", async () => {
@@ -4042,7 +4237,7 @@ describe("native SKC ultragoal runtime", () => {
 
 		const coverageError = await expectRejectedCompleteGate(root, created, descriptionOnlyCoverage);
 
-		expect(coverageError).toContain("executorQa.contractCoverage[0].obligation");
+		expect(coverageError).toContain("verify.contractCoverage[0].obligation");
 		expect(coverageError).toContain("found description");
 	});
 
@@ -4064,7 +4259,7 @@ describe("native SKC ultragoal runtime", () => {
 		const coverageError = await expectRejectedCompleteGate(root, created, allNotApplicableCoverage);
 
 		expect(coverageError).toContain(
-			"executorQa.contractCoverage must include at least one row with status covered, passed, or verified",
+			"verify.contractCoverage must include at least one row with status covered, passed, or verified",
 		);
 	});
 
@@ -4080,7 +4275,7 @@ describe("native SKC ultragoal runtime", () => {
 
 		const artifactError = await expectRejectedCompleteGate(root, created, missingArtifact);
 
-		expect(artifactError).toContain("executorQa.artifactRefs.browser-run");
+		expect(artifactError).toContain("verify.artifactRefs.browser-run");
 		expect(artifactError).toContain("automation transcript path must resolve to an existing file");
 	});
 
@@ -4098,7 +4293,7 @@ describe("native SKC ultragoal runtime", () => {
 
 		const artifactError = await expectRejectedCompleteGate(root, created, emptyArtifact);
 
-		expect(artifactError).toContain("executorQa.artifactRefs.browser-run");
+		expect(artifactError).toContain("verify.artifactRefs.browser-run");
 		expect(artifactError).toContain("automation transcript must be valid JSON");
 	});
 
@@ -4109,7 +4304,7 @@ describe("native SKC ultragoal runtime", () => {
 
 		const artifactError = await expectRejectedCompleteGate(root, created, passingQualityGate());
 
-		expect(artifactError).toContain("executorQa.artifactRefs.browser-run");
+		expect(artifactError).toContain("verify.artifactRefs.browser-run");
 		expect(artifactError).toContain("inlineEvidence and typed verifiedReceipt do not prove live surfaces");
 	});
 
@@ -4127,7 +4322,7 @@ describe("native SKC ultragoal runtime", () => {
 
 		const artifactError = await expectRejectedCompleteGate(root, created, receiptOnlyGate);
 
-		expect(artifactError).toContain("executorQa.artifactRefs.browser-run");
+		expect(artifactError).toContain("verify.artifactRefs.browser-run");
 		expect(artifactError).toContain("typed verifiedReceipt do not prove live surfaces");
 	});
 
@@ -4361,7 +4556,7 @@ describe("native SKC ultragoal runtime", () => {
 
 		const receiptError = await expectRejectedCompleteGate(root, created, degenerateReceipt);
 
-		expect(receiptError).toContain("executorQa.artifactRefs.browser-run");
+		expect(receiptError).toContain("verify.artifactRefs.browser-run");
 		expect(receiptError).toContain("typed verifiedReceipt");
 	});
 
@@ -4386,9 +4581,9 @@ describe("native SKC ultragoal runtime", () => {
 		const surfaceError = await expectRejectedCompleteGate(root, created, missingSurfaceArtifact);
 		const coverageError = await expectRejectedCompleteGate(root, created, missingCoverageLink);
 
-		expect(artifactError).toContain("executorQa.artifactRefs[0].kind");
-		expect(surfaceError).toContain("executorQa.surfaceEvidence[0].artifactRefs");
-		expect(coverageError).toContain("executorQa.contractCoverage[0].surfaceEvidenceRefs");
+		expect(artifactError).toContain("verify.artifactRefs[0].kind");
+		expect(surfaceError).toContain("verify.surfaceEvidence[0].artifactRefs");
+		expect(coverageError).toContain("verify.contractCoverage[0].surfaceEvidenceRefs");
 	});
 
 	it("enforces not-applicable and surface artifact compatibility rules", async () => {
@@ -4430,8 +4625,8 @@ describe("native SKC ultragoal runtime", () => {
 		const guiError = await expectRejectedCompleteGate(root, created, guiWithCliOnlyArtifact);
 		const apiError = await expectRejectedCompleteGate(root, created, apiWithFailureArtifact);
 
-		expect(notApplicableError).toContain("executorQa.surfaceEvidence[0].reason");
-		expect(adversarialError).toContain("executorQa.adversarialCases[0].status");
+		expect(notApplicableError).toContain("verify.surfaceEvidence[0].reason");
+		expect(adversarialError).toContain("verify.adversarialCases[0].status");
 		expect(guiError).toContain("GUI/web surfaces");
 		expect(apiError).toContain("API/package surfaces");
 		expect(apiError).toContain("expected at least one artifact kind containing one of");
@@ -4455,8 +4650,8 @@ describe("native SKC ultragoal runtime", () => {
 		const surfaceError = await expectRejectedCompleteGate(root, created, failedSurfaceVerdict);
 		const adversarialError = await expectRejectedCompleteGate(root, created, failedAdversarialResult);
 
-		expect(surfaceError).toContain("executorQa.surfaceEvidence[0].status");
-		expect(adversarialError).toContain("executorQa.adversarialCases[0].status");
+		expect(surfaceError).toContain("verify.surfaceEvidence[0].status");
+		expect(adversarialError).toContain("verify.adversarialCases[0].status");
 	});
 
 	it("rejects contradictory passed status with failed executor QA outcomes", async () => {
@@ -4477,8 +4672,8 @@ describe("native SKC ultragoal runtime", () => {
 		const surfaceError = await expectRejectedCompleteGate(root, created, passedStatusFailedSurface);
 		const adversarialError = await expectRejectedCompleteGate(root, created, passedStatusFailedAdversarial);
 
-		expect(surfaceError).toContain("executorQa.surfaceEvidence[0].status");
-		expect(adversarialError).toContain("executorQa.adversarialCases[0].status");
+		expect(surfaceError).toContain("verify.surfaceEvidence[0].status");
+		expect(adversarialError).toContain("verify.adversarialCases[0].status");
 	});
 
 	it("rejects covered contracts linked only to not-applicable surface evidence", async () => {
@@ -4499,7 +4694,7 @@ describe("native SKC ultragoal runtime", () => {
 
 		const coverageError = await expectRejectedCompleteGate(root, created, notApplicableOnlyProof);
 
-		expect(coverageError).toContain("executorQa.contractCoverage[0].surfaceEvidenceRefs.surface-gui.status");
+		expect(coverageError).toContain("verify.contractCoverage[0].surfaceEvidenceRefs.surface-gui.status");
 	});
 
 	it("does not require computer-use adversarial cases for prompt-only wording changes", async () => {
@@ -4566,6 +4761,39 @@ describe("native SKC ultragoal runtime", () => {
 
 		expect(result.status).toBe(0);
 		expect(receipt.quality_gate_hash).toEqual(expect.any(String));
+	});
+
+	it("preserves non-object checkpoint gates and rejects conflicting object aliases", async () => {
+		const root = await tempDir();
+		await createUltragoalPlan({ cwd: root, brief: "Ship the fix" });
+		await startNextUltragoalGoal({ cwd: root });
+		await Bun.write(path.join(root, "gate.json"), "42");
+		const values = ["null", '["review"]', "review", "42", "gate.json", '{"review":"notes"}'];
+		const checkpoint = (value: string, evidence: string) =>
+			checkpointUltragoalGoal({
+				cwd: root,
+				goalId: "G001",
+				status: "blocked",
+				evidence,
+				qualityGateJson: value,
+			});
+		for (const [index, value] of values.entries()) await checkpoint(value, `observation ${index}`);
+		const dir = sessionUltragoalDir(root, TEST_SESSION_ID);
+		const files = ["goals.json", "ledger.jsonl"].map(name => path.join(dir, name));
+		const before = await Promise.all(files.map(file => Bun.file(file).text()));
+		await expect(checkpoint('{"review":{},"architectReview":{}}', "mixed aliases")).rejects.toThrow(
+			"has both architectReview and review",
+		);
+		expect(await Promise.all(files.map(file => Bun.file(file).text()))).toEqual(before);
+		const ledger = await readUltragoalLedger(root);
+		expect(ledger.filter(row => row.event === "goal_checkpointed").map(row => row.qualityGateJson)).toEqual([
+			"null",
+			["review"],
+			"review",
+			"42",
+			42,
+			{ architectReview: "notes" },
+		]);
 	});
 
 	it("allows blocked checkpoints without completion quality gates", async () => {

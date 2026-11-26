@@ -8,6 +8,7 @@ import {
 	assertDeepInterviewEnvelopeInputLimits,
 	assertDeepInterviewIntentManifest,
 	assertDeepInterviewStructuredResponseWithinLimit,
+	assertNoDeepInterviewKeyAliasConflict,
 	mergeDeepInterviewEnvelope,
 	normalizeDeepInterviewEnvelope,
 } from "./deep-interview-state";
@@ -260,6 +261,7 @@ function parseTransition(raw: string | undefined): DeepInterviewStageTransition 
 function assertCorePayloadSchema(payload: Record<string, unknown>): void {
 	try {
 		assertDeepInterviewStructuredResponseWithinLimit(payload);
+		assertNoDeepInterviewKeyAliasConflict(payload);
 		assertDeepInterviewEnvelopeInputLimits(normalizeDeepInterviewEnvelope(payload) as Record<string, unknown>);
 	} catch (error) {
 		throw new DeepInterviewStageError(

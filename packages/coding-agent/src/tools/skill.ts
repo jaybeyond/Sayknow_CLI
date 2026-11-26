@@ -26,6 +26,7 @@ import skillDescription from "../prompts/tools/skill.md" with { type: "text" };
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { runNativeStateCommand } from "../skc-runtime/state-runtime";
 import { isCanonicalSkcWorkflowSkill } from "../skill-state/active-state";
+import { resolveSkcWorkflowId } from "../skill-state/canonical-skills";
 import type { ToolSession } from ".";
 import { ToolError } from "./tool-errors";
 
@@ -95,7 +96,9 @@ export class SkillTool implements AgentTool<typeof skillSchema, SkillToolDetails
 				throw new ToolError("skill tool: session has no custom-message bridge");
 			}
 			const skills = this.#session.skills ?? [];
-			const requestedName = normalizeSkillName(input.name);
+			const inputName = normalizeSkillName(input.name);
+			const workflowId = resolveSkcWorkflowId(inputName);
+			const requestedName = workflowId ?? inputName;
 			if (!requestedName) {
 				throw new ToolError("skill tool: `name` is required");
 			}
@@ -122,7 +125,9 @@ export class SkillTool implements AgentTool<typeof skillSchema, SkillToolDetails
 
 			const skill =
 				skills.find(s => s.name === requestedName) ??
-				(await findRuntimeSkillByName(this.#session.cwd, requestedName, this.#getRuntimeSkillPolicy()));
+				(workflowId
+					? undefined
+					: await findRuntimeSkillByName(this.#session.cwd, requestedName, this.#getRuntimeSkillPolicy()));
 			if (!skill) {
 				const available = skills.map(s => s.name).sort();
 				const hint =

@@ -18,6 +18,7 @@ describe("AgentSession workflow intent-diff tracking", () => {
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 	let sessionManager: SessionManager;
+	let executedCommands: string[];
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@skc-workflow-intent-");
@@ -37,10 +38,24 @@ describe("AgentSession workflow intent-diff tracking", () => {
 		});
 
 		sessionManager = SessionManager.inMemory(tempDir.path());
+		executedCommands = [];
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
+			customCommands: ["skill:sonar", "skill:deep-interview", "skill:sonar-extra"].map(name => ({
+				path: "test-command.ts",
+				resolvedPath: path.join(tempDir.path(), "test-command.ts"),
+				source: "project",
+				command: {
+					name,
+					description: name,
+					execute: () => {
+						executedCommands.push(name);
+						return undefined;
+					},
+				},
+			})),
 			modelRegistry,
 		});
 	});
@@ -59,6 +74,19 @@ describe("AgentSession workflow intent-diff tracking", () => {
 					entry.type === "custom" && entry.customType === "workflow-intent-diff",
 			);
 	}
+
+	it("reserves both slash spellings when a workflow is absent without reserving prefixes", async () => {
+		for (const spelling of ["sonar", "deep-interview"]) {
+			const prompt = `/skill:${spelling}`;
+			expect(session.isLocallyHandledSlashCommand(prompt)).toBe(false);
+			await session.prompt(prompt);
+			await session.waitForIdle();
+		}
+		expect(executedCommands).toEqual([]);
+		expect(session.isLocallyHandledSlashCommand("/skill:sonar-extra")).toBe(true);
+		await session.prompt("/skill:sonar-extra");
+		expect(executedCommands).toEqual(["skill:sonar-extra"]);
+	});
 
 	it("records a CustomEntry-only intent diff for clear low-risk direct prompts", async () => {
 		await session.prompt("fix packages/coding-agent/src/session/agent-session.ts null check");
@@ -119,7 +147,7 @@ describe("AgentSession workflow intent-diff tracking", () => {
 		expect(combinedRisk?.data).toMatchObject({
 			route: "ralplan",
 			recommendedSkill: "ralplan",
-			recommendedInvocation: "/skill:ralplan --deliberate",
+			recommendedInvocation: "/skill:blueprint --deliberate",
 			directTracking: "not-direct",
 			rootCausePhase: { status: "active" },
 			consensusReport: {
@@ -127,7 +155,7 @@ describe("AgentSession workflow intent-diff tracking", () => {
 				confidence: "high",
 				escalationGate: {
 					status: "required",
-					reason: "/skill:ralplan --deliberate",
+					reason: "/skill:blueprint --deliberate",
 				},
 			},
 		});
@@ -135,7 +163,7 @@ describe("AgentSession workflow intent-diff tracking", () => {
 			expect.arrayContaining([
 				expect.objectContaining({
 					id: "escalation-gate",
-					evidence: expect.arrayContaining(["escalation: required", "invocation: /skill:ralplan --deliberate"]),
+					evidence: expect.arrayContaining(["escalation: required", "invocation: /skill:blueprint --deliberate"]),
 				}),
 			]),
 		);
@@ -145,7 +173,7 @@ describe("AgentSession workflow intent-diff tracking", () => {
 		expect(contrastiveRisk?.data).toMatchObject({
 			route: "ralplan",
 			recommendedSkill: "ralplan",
-			recommendedInvocation: "/skill:ralplan --deliberate",
+			recommendedInvocation: "/skill:blueprint --deliberate",
 			directTracking: "not-direct",
 			rootCausePhase: { status: "active" },
 		});
@@ -171,19 +199,19 @@ describe("AgentSession workflow intent-diff tracking", () => {
 		expect(deepInterview?.data).toMatchObject({
 			route: "deep-interview",
 			recommendedSkill: "deep-interview",
-			recommendedInvocation: "/skill:deep-interview",
+			recommendedInvocation: "/skill:sonar",
 			directTracking: "not-direct",
 		});
 		expect(ultragoal?.data).toMatchObject({
 			route: "ultragoal",
 			recommendedSkill: "ultragoal",
-			recommendedInvocation: "/skill:ultragoal",
+			recommendedInvocation: "/skill:voyage",
 			directTracking: "not-direct",
 		});
 		expect(productionUltragoal?.data).toMatchObject({
 			route: "ultragoal",
 			recommendedSkill: "ultragoal",
-			recommendedInvocation: "/skill:ultragoal",
+			recommendedInvocation: "/skill:voyage",
 			directTracking: "not-direct",
 			rootCausePhase: { status: "active", triggers: ["high-risk transition"] },
 		});
@@ -226,7 +254,7 @@ describe("AgentSession workflow intent-diff tracking", () => {
 		expect(invocation?.data).toMatchObject({
 			route: "ultragoal",
 			recommendedSkill: "ultragoal",
-			recommendedInvocation: "/skill:ultragoal",
+			recommendedInvocation: "/skill:voyage",
 			directTracking: "not-direct",
 		});
 	});
@@ -238,7 +266,7 @@ describe("AgentSession workflow intent-diff tracking", () => {
 		expect(entry?.data).toMatchObject({
 			route: "ultragoal",
 			recommendedSkill: "ultragoal",
-			recommendedInvocation: "/skill:ultragoal",
+			recommendedInvocation: "/skill:voyage",
 			directTracking: "not-direct",
 		});
 	});
@@ -251,13 +279,13 @@ describe("AgentSession workflow intent-diff tracking", () => {
 		expect(naturalLanguage?.data).toMatchObject({
 			route: "deep-interview",
 			recommendedSkill: "deep-interview",
-			recommendedInvocation: "/skill:deep-interview",
+			recommendedInvocation: "/skill:sonar",
 			directTracking: "not-direct",
 		});
 		expect(policyPhrase?.data).toMatchObject({
 			route: "deep-interview",
 			recommendedSkill: "deep-interview",
-			recommendedInvocation: "/skill:deep-interview",
+			recommendedInvocation: "/skill:sonar",
 			directTracking: "not-direct",
 		});
 	});
@@ -269,7 +297,7 @@ describe("AgentSession workflow intent-diff tracking", () => {
 		expect(entry?.data).toMatchObject({
 			route: "team",
 			recommendedSkill: "team",
-			recommendedInvocation: "/skill:team",
+			recommendedInvocation: "/skill:octo",
 			directTracking: "not-direct",
 		});
 	});

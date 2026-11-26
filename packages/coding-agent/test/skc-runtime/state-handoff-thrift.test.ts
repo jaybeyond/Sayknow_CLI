@@ -290,7 +290,7 @@ describe("CONSUMER/KEY-FIELD MATRIX for compact handoff payloads", () => {
 			"ultragoal next-action=execute-goal goal-id=G001
 			objective=Ship the compact output
 			skc-objective=Complete the durable ultragoal plan in .skc/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .skc/ultragoal/ledger.jsonl as the audit trail.
-			checkpoint requires=architectReview:CLEAR+APPROVE,executorQa:passed
+			checkpoint requires=review:CLEAR+APPROVE,verify:passed
 			"
 			`);
 		const checkpoint = await runNativeUltragoalCommand(

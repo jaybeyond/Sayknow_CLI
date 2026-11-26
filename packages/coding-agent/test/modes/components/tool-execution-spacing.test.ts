@@ -1,10 +1,12 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { KeybindingsManager } from "@sayknow-cli/coding-agent/config/keybindings";
 import { resetSettingsForTest, Settings } from "@sayknow-cli/coding-agent/config/settings";
 import { type IrcSidebarTheme, IrcSplitViewComponent } from "@sayknow-cli/coding-agent/modes/components/irc-sidebar";
 import { ToolExecutionComponent } from "@sayknow-cli/coding-agent/modes/components/tool-execution";
 import { IrcObservationLedger } from "@sayknow-cli/coding-agent/modes/irc-observation-ledger";
 import * as themeModule from "@sayknow-cli/coding-agent/modes/theme/theme";
-import { ImageProtocol, TERMINAL, type TUI } from "@sayknow-cli/tui";
+import { getKeybindings, ImageProtocol, setKeybindings, TERMINAL, type TUI } from "@sayknow-cli/tui";
+import { getLanguage, setLanguage } from "../../../src/i18n";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -64,6 +66,42 @@ describe("ToolExecutionComponent spacing", () => {
 		const { trailing } = countEdgeBlanks(a);
 		const { leading } = countEdgeBlanks(b);
 		expect(trailing + leading).toBe(1);
+	});
+
+	it("folds successful output into one line and restores its details when expanded", () => {
+		const component = new ToolExecutionComponent("bash", { command: "git status" }, {}, undefined, uiStub);
+		component.updateResult({ content: [{ type: "text", text: "working tree\nsecond detail line" }] }, false);
+		const collapsed = component
+			.render(52)
+			.map(line => Bun.stripANSI(line))
+			.filter(line => line.trim());
+		expect(collapsed).toHaveLength(1);
+		expect(collapsed[0]).toContain("working tree");
+		expect(collapsed[0]).not.toContain("second detail line");
+		component.setManuallyExpanded(true);
+		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("second detail line");
+	});
+
+	it("shows the configured expand key in the interface language and hides it when unbound", () => {
+		const previousKeys = getKeybindings();
+		const previousLanguage = getLanguage();
+		const component = new ToolExecutionComponent("bash", { command: "git status" }, {}, undefined, uiStub);
+		component.updateResult({ content: [{ type: "text", text: "작업 완료\n세부 정보" }] }, false);
+		const render = (width: number) => Bun.stripANSI(component.render(width).join("\n"));
+		try {
+			setLanguage("ko");
+			const custom = KeybindingsManager.inMemory({ "app.tools.expand": "ctrl+x" });
+			custom.setDisplayContext({ platform: "darwin" });
+			setKeybindings(custom);
+			expect(render(52)).toContain("⌃X 펼치기");
+			expect(render(52)).not.toContain("Ctrl+O");
+			setKeybindings(KeybindingsManager.inMemory({ "app.tools.expand": [] }));
+			expect(render(52)).not.toContain("펼치기");
+			expect(render(52)).toContain("작업 완료");
+		} finally {
+			setKeybindings(previousKeys);
+			setLanguage(previousLanguage);
+		}
 	});
 });
 it("preserves manual expansion through automatic updates and drops it on remount", () => {

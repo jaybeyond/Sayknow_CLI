@@ -1,14 +1,12 @@
 import * as path from "node:path";
 import { getAgentDir, isEnoent, parseFrontmatter } from "@sayknow-cli/utils";
-import autoAnswerUncertainFragment from "./skc/skills/deep-interview/auto-answer-uncertain.md" with { type: "text" };
-import autoResearchGreenfieldFragment from "./skc/skills/deep-interview/auto-research-greenfield.md" with {
-	type: "text",
-};
-import lateralReviewPanelFragment from "./skc/skills/deep-interview/lateral-review-panel.md" with { type: "text" };
+import autofillFragment from "./skc/skills/deep-interview/autofill.md" with { type: "text" };
+import panelFragment from "./skc/skills/deep-interview/panel.md" with { type: "text" };
+import researchFragment from "./skc/skills/deep-interview/research.md" with { type: "text" };
 import deepInterviewSkill from "./skc/skills/deep-interview/SKILL.md" with { type: "text" };
 import ralplanSkill from "./skc/skills/ralplan/SKILL.md" with { type: "text" };
 import teamSkill from "./skc/skills/team/SKILL.md" with { type: "text" };
-import aiSlopCleanerFragment from "./skc/skills/ultragoal/ai-slop-cleaner.md" with { type: "text" };
+import cleanupFragment from "./skc/skills/ultragoal/cleanup.md" with { type: "text" };
 import pipelineValidationContractsFragment from "./skc/skills/ultragoal/pipeline-validation-contracts.md" with {
 	type: "text",
 };
@@ -39,6 +37,7 @@ export interface DefaultSkcSkillFragmentDefinition {
 	kind: "skill-fragment";
 	parentSkillName: DefaultSkcDefinitionName;
 	relativePath: string;
+	legacyRelativePaths?: readonly string[];
 	content: string;
 }
 
@@ -95,26 +94,30 @@ const DEFAULT_SKC_DEFINITIONS: readonly DefaultSkcDefinition[] = [
 	{
 		kind: "skill-fragment",
 		parentSkillName: "deep-interview",
-		relativePath: "skill-fragments/deep-interview/auto-research-greenfield.md",
-		content: autoResearchGreenfieldFragment,
+		relativePath: "skill-fragments/deep-interview/research.md",
+		legacyRelativePaths: ["skill-fragments/deep-interview/auto-research-greenfield.md"],
+		content: researchFragment,
 	},
 	{
 		kind: "skill-fragment",
 		parentSkillName: "deep-interview",
-		relativePath: "skill-fragments/deep-interview/auto-answer-uncertain.md",
-		content: autoAnswerUncertainFragment,
+		relativePath: "skill-fragments/deep-interview/autofill.md",
+		legacyRelativePaths: ["skill-fragments/deep-interview/auto-answer-uncertain.md"],
+		content: autofillFragment,
 	},
 	{
 		kind: "skill-fragment",
 		parentSkillName: "deep-interview",
-		relativePath: "skill-fragments/deep-interview/lateral-review-panel.md",
-		content: lateralReviewPanelFragment,
+		relativePath: "skill-fragments/deep-interview/panel.md",
+		legacyRelativePaths: ["skill-fragments/deep-interview/lateral-review-panel.md"],
+		content: panelFragment,
 	},
 	{
 		kind: "skill-fragment",
 		parentSkillName: "ultragoal",
-		relativePath: "skill-fragments/ultragoal/ai-slop-cleaner.md",
-		content: aiSlopCleanerFragment,
+		relativePath: "skill-fragments/ultragoal/cleanup.md",
+		legacyRelativePaths: ["skill-fragments/ultragoal/ai-slop-cleaner.md"],
+		content: cleanupFragment,
 	},
 	{
 		kind: "skill-fragment",
@@ -179,6 +182,14 @@ export async function installDefaultSkcDefinitions(
 		} else if (options.refreshOnly) {
 			if (existing === undefined) {
 				status = "missing";
+				if (definition.kind === "skill-fragment") {
+					for (const legacy of definition.legacyRelativePaths ?? []) {
+						if ((await readExistingText(path.join(targetRoot, legacy))) === undefined) continue;
+						await Bun.write(destination, definition.content);
+						status = "written";
+						break;
+					}
+				}
 			} else if (existing === definition.content) {
 				status = "matching";
 			} else {

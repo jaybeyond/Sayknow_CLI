@@ -15,6 +15,7 @@
 
 import * as path from "node:path";
 import type { BundledSkcUiSkillName } from "../defaults/skc-ui-skills";
+import designBookmarkMotion from "../prompts/system/designbookmark-motion.md" with { type: "text" };
 
 export interface UiSkillKeywordDefinition {
 	skill: BundledSkcUiSkillName;
@@ -210,6 +211,51 @@ const TERMINAL_ONLY_PATTERN = /\b(tui|terminal|ansi|tmux|curses)\b/i;
 const WEB_SURFACE_PATTERN =
 	/\b(web|browser|css|html|react|vue|svelte|next\.?js|tailwind|dom|mobile|ios|android|page|screen)\b|웹|브라우저|화면|페이지/i;
 
+const [motionGuidance, motionIndex] = designBookmarkMotion.trim().split("\n\n---\n\n");
+const motionAliases: Readonly<Record<string, RegExp>> = {
+	"db-morph-tooltip": /\btooltips?\b|툴팁/i,
+	"db-spring-dropdown": /\bdropdowns?\b|드롭\s*다운/i,
+	"db-file-drop": /\b(?:file upload|drop ?zone)\b|파일\s*(?:드롭|업로드)/i,
+	"db-streaming-reply": /\bstream(?:ing)? (?:response|answer)\b|(?:응답|답변)\s*스트리밍|스트리밍\s*(?:응답|답변)/i,
+	"db-tab-pill": /\b(?:tab indicator|tab transition)s?\b|탭\s*(?:전환|인디케이터)/i,
+	"db-sidebar-collapse": /\bcollaps(?:e|ing|ible) (?:the )?sidebar\b|사이드바\s*(?:접|펼)/i,
+	"db-toggle-switch": /\b(?:switch animation|toggle animation)\b|토글|스위치/i,
+	"db-hold-button": /\bhold to (?:confirm|delete)\b|길게\s*눌러/i,
+	"db-loading-success": /\b(?:loading to done|success feedback)\b|로딩[^.?!\n]{0,16}(?:완료|성공)/i,
+	"morph-popover": /\bpopovers?\b|팝오버/i,
+	"notification-stack": /\b(?:stacked toasts|toast stack)\b|토스트\s*(?:스택|쌓)/i,
+	"db-command-palette": /커맨드\s*팔레트/i,
+	"db-pull-refresh": /당겨서\s*새로\s*고침/i,
+	"slide-to-confirm": /밀어서\s*확인/i,
+};
+
+function normalizeMotionTitle(text: string): string {
+	return text
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, " ")
+		.trim();
+}
+
+const motionDemos = motionIndex.split("\n").map(row => {
+	const [title, slug] = row.split(" | ");
+	return { title, slug, phrase: ` ${normalizeMotionTitle(title.replace(/\s*\([^)]*\)$/, ""))} ` };
+});
+
+function renderMotionReference(text: string): string {
+	const normalized = ` ${normalizeMotionTitle(text)} `;
+	const exact: string[] = [];
+	const related: string[] = [];
+	for (const { title, slug, phrase } of motionDemos) {
+		const matches = normalized.includes(phrase) ? exact : motionAliases[slug]?.test(text) ? related : null;
+		if (matches) {
+			matches.push(
+				`- [${title}](https://designbookmark.com/motion#${slug}) — [source](https://designbookmark.com/motion-src/code/${slug}.txt)`,
+			);
+		}
+	}
+	return [motionGuidance, ...exact.concat(related).slice(0, 3)].join("\n");
+}
+
 /**
  * Detect frontend UI/UX intent. Returns `stageshow` first, then the most
  * specific match, then `emil-design-eng` as the craft baseline.
@@ -259,15 +305,16 @@ function pairWithCoreAndBaseline(lead: UiSkillKeywordMatch): UiSkillKeywordMatch
 	return paired.filter((item, index) => paired.findIndex(other => other.skill === item.skill) === index);
 }
 
-function renderUiSkillDirective(skills: readonly BundledSkcUiSkillName[], evidence: string): string {
+function renderUiSkillDirective(skills: readonly BundledSkcUiSkillName[], evidence: string, text: string): string {
 	const names = skills.map(skill => `\`${skill}\``).join(" then ");
-	return [
+	const directive = [
 		`SKC detected frontend UI/UX work in this prompt (${evidence}).`,
 		`Before writing or reviewing that surface, load ${names} with the \`skill\` tool.`,
 		`\`${UI_SKILL_CORE}\` is the design center for every frontend surface, real product UI included; apply it even when the task is not a demo.`,
 		"These skills are bundled with SKC: never tell the user to install them, and never skip them because the task looks small.",
 		"They are not workflow skills and have no `skc state` mode state.",
 	].join(" ");
+	return `${directive}\n\n${renderMotionReference(text)}`;
 }
 
 /**
@@ -281,6 +328,7 @@ export function buildUiSkillActivationContext(text: string): string | null {
 	return renderUiSkillDirective(
 		pairWithCoreAndBaseline(lead).map(match => match.skill),
 		`matched "${lead.keyword}"`,
+		text,
 	);
 }
 
@@ -290,10 +338,11 @@ export function buildUiSkillActivationContext(text: string): string | null {
  * for the other three, and it names its source so a wrong pick is traceable to
  * the model rather than to a pattern nobody can find.
  */
-export function buildUiSkillDirectiveForSkill(skill: BundledSkcUiSkillName): string {
+export function buildUiSkillDirectiveForSkill(skill: BundledSkcUiSkillName, text = ""): string {
 	return renderUiSkillDirective(
 		pairWithCoreAndBaseline(skillMatch(skill)).map(match => match.skill),
 		"semantic match",
+		text,
 	);
 }
 

@@ -2,9 +2,9 @@ import { Command, Flags } from "@sayknow-cli/utils/cli";
 import { runNativeDeepInterviewCommand } from "../skc-runtime/deep-interview-runtime";
 
 export default class DeepInterview extends Command {
-	static description = `Run native SKC deep-interview workflow.
+	static description = `Run Sonar, SKC's requirements interview workflow.
 
-All deep-interview state operations go through this command — no skc state needed:
+Sonar state operations go through this command without a separate skc state call:
   read                Print the persisted envelope, revision, content sha, and any pending draft
   write               One-shot incremental JSON merge into state (--reset replaces; the locked
                       intent contract survives a reset)
@@ -46,14 +46,14 @@ session_id, or SKC_SESSION_ID.`;
 		json: Flags.boolean({ description: "Output JSON" }),
 	};
 	static examples = [
-		'$ skc deep-interview --trace --standard "<idea>"',
-		"$ skc deep-interview read --json",
-		'$ skc deep-interview write --input \'{"state":{"threshold":0.05}}\' --json',
-		'$ skc deep-interview stage --for record-round --input \'{"state":{"rounds":[{"round":1,"round_key":"r1"}]}}\' --json',
-		"$ skc deep-interview check --json",
-		"$ skc deep-interview apply --json",
-		"$ skc deep-interview --write --stage final --slug my-feature --spec ./final-spec.md",
-		"$ skc deep-interview --write --stage final --slug my-feature --spec ./final-spec.md --deliberate",
+		'$ skc sonar --trace --standard "<idea>"',
+		"$ skc sonar read --json",
+		'$ skc sonar write --input \'{"state":{"threshold":0.05}}\' --json',
+		'$ skc sonar stage --for record-round --input \'{"state":{"rounds":[{"round":1,"round_key":"r1"}]}}\' --json',
+		"$ skc sonar check --json",
+		"$ skc sonar apply --json",
+		"$ skc sonar --write --stage final --slug my-feature --spec ./final-spec.md",
+		"$ skc sonar --write --stage final --slug my-feature --spec ./final-spec.md --deliberate",
 	];
 
 	async run(): Promise<void> {

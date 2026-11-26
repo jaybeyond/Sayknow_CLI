@@ -1,16 +1,24 @@
 import type { AgentMessage } from "@sayknow-cli/agent-core";
 import type { AssistantMessage, ImageContent, Message } from "@sayknow-cli/ai";
-import { type Component, Loader, Spacer, Text, TruncatedText, type TUI, truncateToWidth } from "@sayknow-cli/tui";
+import {
+	type Component,
+	Loader,
+	Spacer,
+	Text,
+	TruncatedText,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@sayknow-cli/tui";
 import { settings } from "../../config/settings";
 import { resolveSubskillActivationForSkillInvocation } from "../../extensibility/skc-plugins";
 import { buildSkillPromptMessage, parseSkillInvocations } from "../../extensibility/skills";
-import { tMessage } from "../../i18n";
+import { t, tMessage } from "../../i18n";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { BranchSummaryMessageComponent } from "../../modes/components/branch-summary-message";
 import { CompactionSummaryMessageComponent } from "../../modes/components/compaction-summary-message";
 import { CustomMessageComponent } from "../../modes/components/custom-message";
-import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import {
 	ReadToolGroupComponent,
@@ -42,6 +50,7 @@ import {
 	type SessionContext,
 } from "../../session/session-manager";
 import { formatBytes, formatDuration } from "../../tools/render-utils";
+import { sanitizeStatusLineText } from "../../tui";
 import { buildAbortDisplayMessage } from "./abort-message";
 import {
 	formatIrcMessageBlock,
@@ -967,20 +976,15 @@ export class UiHelpers {
 	}
 
 	showNewVersionNotification(newVersion: string): void {
-		addChatChild(this.ctx, new Spacer(1));
-		addChatChild(this.ctx, new DynamicBorder(text => theme.fg("warning", text)));
-		addChatChild(
-			this.ctx,
-			new Text(
-				theme.bold(theme.fg("warning", "Update Available")) +
-					"\n" +
-					theme.fg("muted", `New version ${newVersion} is available. Run: `) +
-					theme.fg("accent", "skc update"),
-				1,
-				0,
-			),
-		);
-		addChatChild(this.ctx, new DynamicBorder(text => theme.fg("warning", text)));
+		addChatChild(this.ctx, {
+			invalidate() {},
+			render(width) {
+				if (width <= 1) return [];
+				const notice = theme.fg("muted", t("update.available", { version: sanitizeStatusLineText(newVersion) }));
+				const full = `${notice}${theme.fg("dim", " · ")}${theme.fg("accent", "skc update")}`;
+				return [` ${visibleWidth(full) < width ? full : truncateToWidth(notice, width - 1)}`];
+			},
+		});
 		this.ctx.ui.requestRender();
 	}
 

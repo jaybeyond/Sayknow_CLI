@@ -344,6 +344,7 @@ import {
 	readVisibleSkillActiveState,
 	syncSkillActiveState,
 } from "../skill-state/active-state";
+import { isReservedSkcWorkflowCommand, resolveSkcWorkflowId } from "../skill-state/canonical-skills";
 import {
 	assertWorkflowMutationAllowed,
 	assertWorkflowMutationRawPathsAllowed,
@@ -7311,7 +7312,8 @@ export class AgentSession {
 		args = "",
 		options?: Pick<PromptOptions, "onPreflightAccepted" | "onPreflightAcceptCommit" | "onSkillPrepared">,
 	): Promise<{ name: string; path: string; args?: string; lineCount?: number }> {
-		const skillName = name.trim();
+		const requestedName = name.trim();
+		const skillName = resolveSkcWorkflowId(requestedName) ?? requestedName;
 		if (!skillName) throw Object.assign(new Error("skill.invoke requires a skill name."), { code: "invalid_input" });
 		if (typeof args !== "string")
 			throw Object.assign(new Error("skill.invoke args must be a string."), { code: "invalid_input" });
@@ -7745,8 +7747,9 @@ export class AgentSession {
 
 	/** Custom commands (TypeScript slash commands and MCP prompts) */
 	get customCommands(): ReadonlyArray<LoadedCustomCommand> {
-		if (this.#mcpPromptCommands.length === 0) return this.#customCommands;
-		return [...this.#customCommands, ...this.#mcpPromptCommands];
+		return [...this.#customCommands, ...this.#mcpPromptCommands].filter(
+			loaded => !isReservedSkcWorkflowCommand(loaded.command.name),
+		);
 	}
 
 	/** Update the MCP prompt commands list. Called when server prompts are (re)loaded. */
@@ -8237,6 +8240,7 @@ export class AgentSession {
 		if (!text.startsWith("/")) return false;
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+		if (isReservedSkcWorkflowCommand(commandName)) return false;
 		return (
 			this.#extensionRunner?.getCommand(commandName) !== undefined ||
 			this.#customCommands.some(c => c.command.name === commandName) ||
@@ -8251,6 +8255,8 @@ export class AgentSession {
 			invalidateSessionTitleGeneration(this.sessionManager);
 		this.#assertRecoveryHydrationPromoted();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
+		const reservedWorkflowInvocation =
+			text.startsWith("/skill:") && isReservedSkcWorkflowCommand(text.slice(1).split(/\s/, 1)[0] ?? "");
 
 		if (expandPromptTemplates) {
 			const invocation = this.resolvePromptSkillInvocation(text, options?.images);
@@ -8272,7 +8278,7 @@ export class AgentSession {
 		}
 
 		// Handle extension commands first (execute immediately, even during streaming)
-		if (expandPromptTemplates && text.startsWith("/")) {
+		if (expandPromptTemplates && text.startsWith("/") && !reservedWorkflowInvocation) {
 			const handled = await this.#tryExecuteExtensionCommand(text);
 			if (handled) {
 				return;
@@ -8295,7 +8301,10 @@ export class AgentSession {
 		}
 
 		// Expand file-based prompt templates if requested
-		const expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
+		const expandedText =
+			expandPromptTemplates && !reservedWorkflowInvocation
+				? expandPromptTemplate(text, [...this.#promptTemplates])
+				: text;
 		assertPromptNotEmpty(expandedText, options?.images);
 		assertImagePlaceholdersHavePayload(expandedText, options?.images);
 		const workflowIntentDiff = options?.synthetic ? null : buildWorkflowIntentDiff(expandedText);
@@ -8590,7 +8599,7 @@ export class AgentSession {
 			if (options?.resetRetryReplaySafety) this.#resetRetryReplaySafety();
 			if (message.role === "user") {
 				await this.#resetDefaultFallbackForNewTurn();
-				await this.#ensureDefaultFallbackResolution();
+				await this.#ensureDefaultFallbackResolution(preflightSignal);
 				this.#defaultFallbackChain().resetAttemptBudget();
 				this.#overflowMaintenanceAttempts = 0;
 				this.#throwIfPromptPreflightCancelled(generation, preflightSignal);
@@ -12786,7 +12795,7 @@ export class AgentSession {
 		if (this.#planModeState?.enabled) return undefined;
 		const matched = buildUiSkillActivationContext(promptText);
 		const directive =
-			matched ?? (this.#semanticUiSkill ? buildUiSkillDirectiveForSkill(this.#semanticUiSkill) : null);
+			matched ?? (this.#semanticUiSkill ? buildUiSkillDirectiveForSkill(this.#semanticUiSkill, promptText) : null);
 		if (!directive) return undefined;
 		logger.debug("agent-session: bundled UI skill matched", {
 			promptChars: promptText.length,
@@ -14584,16 +14593,26 @@ export class AgentSession {
 		}
 	}
 
-	async #ensureDefaultFallbackResolution(): Promise<void> {
+	async #ensureDefaultFallbackResolution(signal: AbortSignal): Promise<void> {
 		const controller = this.#defaultFallbackChain();
 		if (controller.chain.entries.length < 2) return;
 		const resolutionStart = controller.activeIndex;
+		// An explicitly configured chain opts into skipping an unavailable entry.
+		// An automatically built tail does not opt into crossing providers on an ambiguous auth miss.
+		const automaticOnlyTail =
+			resolutionStart === 0 &&
+			controller.chain.appendedFrom === 1 &&
+			!this.settings.get("fallback.models").some(selector => controller.chain.entries.indexOf(selector.trim()) > 0);
 		const resolution = await resolveModelChainWithAuth(
 			controller.chain.entries.slice(resolutionStart),
 			this.#modelRegistry,
 			this.settings,
 			this.sessionId,
-			{ managedFallback: true },
+			{
+				managedFallback: true,
+				signal,
+				retryPrimaryAuth: automaticOnlyTail ? model => this.#modelRegistry.hasConfiguredAuth(model) : undefined,
+			},
 		);
 		const activeIndex = resolutionStart + resolution.activeIndex;
 		if (activeIndex > resolutionStart) {
@@ -14873,6 +14892,7 @@ export class AgentSession {
 			this.#setModelAuthoritatively(resolved.model, "fallback-switch");
 			this.setThinkingLevel(resolved.explicitThinkingLevel ? resolved.thinkingLevel : this.thinkingLevel);
 			if (from !== to) {
+				logger.debug("Model fallback switched", { from, to, reason, attemptsUsed });
 				this.#emit({
 					type: "model_fallback_switched",
 					eventId: crypto.randomUUID(),
@@ -14899,6 +14919,11 @@ export class AgentSession {
 		const to = controller.currentSelector();
 		const from = controller.chain.entries[controller.activeIndex - 1];
 		if (!from || !to || from === to) return;
+		logger.debug("Model fallback switched during resolution", {
+			from,
+			to,
+			skipReasons: controller.skips.map(skip => skip.reason),
+		});
 		const event: Extract<AgentSessionEvent, { type: "model_fallback_switched" }> = {
 			type: "model_fallback_switched",
 			eventId: crypto.randomUUID(),

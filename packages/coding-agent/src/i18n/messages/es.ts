@@ -25,6 +25,7 @@ export const es: Partial<Record<MsgKey, string>> = {
 	"composer.steer": "Dirigir",
 	"composer.queue": "Cola",
 	"composer.newLine": "Nueva línea",
+	"tools.expandHint": "Expandir",
 	"settings.title": "Ajustes",
 	"settings.preview": "Vista previa:",
 	"settings.tabCycle": "Tab para cambiar",

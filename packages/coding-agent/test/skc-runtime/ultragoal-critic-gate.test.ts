@@ -244,7 +244,7 @@ describe("ultragoal terminal critic gate", () => {
 			mutate(gate);
 			const result = await checkpoint(root, gate);
 			expect(result.status).toBe(1);
-			expect(result.stderr).toContain("criticReview");
+			expect(result.stderr).toContain("signoff");
 			await fs.rm(path.join(root, ".skc"), { recursive: true, force: true });
 		}
 		await createUltragoalPlan({ cwd: root, brief: "Ship accepted gate" });

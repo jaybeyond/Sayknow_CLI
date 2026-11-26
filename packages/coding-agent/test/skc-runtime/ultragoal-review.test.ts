@@ -274,6 +274,20 @@ describe("ultragoal review command", () => {
 	it("parses branch and worktree sources and falls back when gh cannot resolve a pr", async () => {
 		const root = await tempDir();
 		await writeStructuralArtifacts(root);
+		for (const [first, second] of [
+			["--verify-json", "--verify"],
+			["--executor-qa-json", "--executor-qa"],
+			["--verify", "--executor-qa-json"],
+		]) {
+			for (const tokens of [
+				[first!, "{}", second!, "{}"],
+				[first!, "{}", `${second}={}`],
+			]) {
+				const result = await runNativeUltragoalCommand(["review", ...tokens, "--json"], root);
+				expect(result.status).toBe(1);
+				expect(result.stderr).toContain(`has both ${first} and ${second}`);
+			}
+		}
 		const qaPath = await writeQa(root, validExecutorQa());
 		expect((await review(root, ["--executor-qa-json", qaPath])).source).toMatchObject({ kind: "worktree" });
 		expect((await review(root, ["--branch", "HEAD", "--executor-qa-json", qaPath])).source).toMatchObject({
@@ -294,6 +308,22 @@ describe("ultragoal review command", () => {
 		expect(output.contractStrength).toBe("strong");
 		expect(output.verdict).toBe("pass");
 		expect(output.cleanPassEligible).toBe(true);
+		const attached = await review(root, ["--spec", "spec.md", `--verify-json=${qaPath}`]);
+		expect(attached.verdict).toBe("pass");
+		expect(attached.legacy_keys_normalized).toBeDefined();
+		const missing = await runNativeUltragoalCommand(["review", "--verify-json=", "--json"], root);
+		expect(missing.status).toBe(1);
+		expect(missing.stderr).toContain("requires a JSON value or file path");
+	});
+
+	it("treats an option-like spec filename as a literal before scanning verify aliases", async () => {
+		const root = await tempDir();
+		await writeStructuralArtifacts(root);
+		const spec = "--verify-json=example";
+		await Bun.write(path.join(root, spec), "Strong acceptance criteria");
+		const output = await review(root, ["--spec", spec, "--verify-json", await writeQa(root, validExecutorQa())]);
+		expect(output.contractStrength).toBe("strong");
+		expect(output.verdict).toBe("pass");
 	});
 
 	it("review-only emits findings without creating goals or ledger entries", async () => {

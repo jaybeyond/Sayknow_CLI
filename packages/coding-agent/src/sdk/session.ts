@@ -83,6 +83,7 @@ import {
 	renderAlwaysOnSystemAppendices,
 } from "../extensibility/skc-plugins/runtime-adapters";
 import { loadActiveSubskillTools } from "../extensibility/skc-plugins/tools";
+import { createSkillNameFilter } from "../extensibility/skill-name-filter";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -119,6 +120,7 @@ import { type CustomMessage, convertToLlm } from "../session/messages";
 import type { DetectedLanguage } from "../session/response-language";
 import { createReadonlySessionManager, SessionManager } from "../session/session-manager";
 import { formatNoModelsAvailableFallback } from "../setup/model-onboarding-guidance";
+import { getSkcWorkflowPublicName, resolveSkcWorkflowId } from "../skill-state/canonical-skills";
 import { closeAllConnections } from "../ssh/connection-manager";
 import { unmountAll } from "../ssh/sshfs-mount";
 import {
@@ -914,12 +916,25 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
  * ```
  */
 
-function withEmbeddedDefaultSkcSkills(skills: Skill[]): Skill[] {
-	const byName = new Map(skills.map(skill => [skill.name, skill]));
+function withEmbeddedDefaultSkcSkills(skills: Skill[], disabledExtensions: readonly string[] = []): Skill[] {
+	const disabled = new Set(disabledExtensions);
+	const byName = new Map<string, Skill>();
+	for (const skill of skills) {
+		const id = resolveSkcWorkflowId(skill.name);
+		if (
+			id &&
+			(id !== skill.name || disabled.has(`skill:${id}`) || disabled.has(`skill:${getSkcWorkflowPublicName(id)}`))
+		)
+			continue;
+		byName.set(skill.name, skill);
+	}
 	for (const defaultSkill of getEmbeddedDefaultSkcSkills()) {
-		if (!byName.has(defaultSkill.name)) {
-			byName.set(defaultSkill.name, defaultSkill);
-		}
+		if (
+			disabled.has(`skill:${defaultSkill.name}`) ||
+			disabled.has(`skill:${getSkcWorkflowPublicName(defaultSkill.name)}`)
+		)
+			continue;
+		if (!byName.has(defaultSkill.name)) byName.set(defaultSkill.name, defaultSkill);
 	}
 	return withEmbeddedSkcSecuritySkills(withEmbeddedSkcUiSkills([...byName.values()]));
 }
@@ -1313,29 +1328,39 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		let skills: Skill[];
 		let skillWarnings: SkillWarning[];
-		if (options.skills !== undefined) {
+		const disabledExtensions = settings.get("disabledExtensions");
+		if (settings.has("skills.enabled") && !settings.get("skills.enabled")) {
+			// The schema default only disables discovery; an explicit false disables invocation too.
+			skills = [];
+			skillWarnings = [];
+		} else if (options.skills !== undefined) {
 			// The four public SKC workflow skills are a product invariant, not
 			// ordinary filesystem-discovered skills. Keep them available even for
 			// explicit SDK skill lists so startup and command routing survive
 			// accidental `.skc` deletion or overzealous caller filtering.
-			skills = withEmbeddedDefaultSkcSkills(options.skills);
+			skills = withEmbeddedDefaultSkcSkills(options.skills, disabledExtensions);
 			skillWarnings = [];
 		} else if (settings.get("skills.enabled")) {
 			const skillsResult = await logger.time("loadSkills", loadSkills, {
 				...settings.getGroup("skills"),
 				cwd,
-				disabledExtensions: settings.get("disabledExtensions"),
+				disabledExtensions,
 			});
-			skills = withEmbeddedDefaultSkcSkills(skillsResult.skills);
+			skills = withEmbeddedDefaultSkcSkills(skillsResult.skills, disabledExtensions);
 			skillWarnings = skillsResult.warnings;
 		} else {
 			// SKC's four public workflow skills plus the bundled UI craft and
 			// security review skills are compiled into the binary so the default
 			// surface survives accidental .skc deletion. Arbitrary filesystem skill
 			// discovery remains gated by skills.enabled above.
-			skills = withEmbeddedDefaultSkcSkills([]);
+			skills = withEmbeddedDefaultSkcSkills([], disabledExtensions);
 			skillWarnings = [];
 		}
+		const allowsSkillName = createSkillNameFilter(
+			settings.get("skills.includeSkills") ?? [],
+			settings.get("skills.ignoredSkills") ?? [],
+		);
+		skills = skills.filter(skill => !resolveSkcWorkflowId(skill.name) || allowsSkillName(skill.name));
 
 		// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
 		const { ttsrManager, rulebookRules, alwaysApplyRules } = await logger.time("discoverTtsrRules", async () => {

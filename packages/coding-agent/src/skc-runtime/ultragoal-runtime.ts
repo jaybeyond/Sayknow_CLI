@@ -12,6 +12,15 @@ import {
 	type RepositoryBinding,
 } from "./repository-binding";
 import {
+	normalizeQualityGateInput,
+	normalizeReviewFindingKey,
+	normalizeVerifyInput,
+	readBatchClose,
+	readBatchDeferred,
+	resolveStoredBatch,
+	toStorageGate,
+} from "./ultragoal-key-aliases";
+import {
 	CRITIC_GATE_HARD_STOP_EVENT,
 	CRITIC_GATE_OVERRIDE_EVENT,
 	CRITIC_VERDICT_EVENT,
@@ -451,7 +460,16 @@ export async function readUltragoalLedger(cwd: string, sessionId?: string | null
 			.split(/\r?\n/)
 			.map(line => line.trim())
 			.filter(line => line.length > 0)
-			.map(line => JSON.parse(line) as UltragoalLedgerEvent);
+			.map(line => {
+				const event = JSON.parse(line) as UltragoalLedgerEvent;
+				if (event.completionVerification) {
+					event.completionVerification = normalizeCheckpointReceipt(
+						event.completionVerification,
+						`ledger event ${event.eventId}`,
+					);
+				}
+				return event;
+			});
 	} catch (error) {
 		if (isEnoent(error)) return [];
 		throw error;
@@ -709,7 +727,7 @@ function buildCompletionReceipt(input: {
 	let validationBatch: UltragoalCompletionVerification["validationBatch"];
 	if (input.goal.validationBatch) {
 		if (input.goal.id !== input.goal.validationBatch.finalGoalId) {
-			const deferred = qualityGateObject(input.qualityGateJson.deferredToBatch);
+			const deferred = readBatchDeferred(input.qualityGateJson);
 			const changeSet = qualityGateObject(deferred?.changeSet);
 			validationBatch = {
 				schemaVersion: 1,
@@ -721,7 +739,7 @@ function buildCompletionReceipt(input: {
 				changeSetHash: String(changeSet?.changeSetHash ?? ""),
 			};
 		} else {
-			const close = qualityGateObject(input.qualityGateJson.validationBatchClose);
+			const close = readBatchClose(input.qualityGateJson);
 			const union = qualityGateObject(close?.unionChangeSet);
 			const memberReceiptIds: Record<string, string> = {};
 			const memberCheckpointLedgerEventIds: Record<string, string> = {};
@@ -1036,7 +1054,7 @@ function requireFreshBatchCloseReceiptBasis(
 			throw new Error(`Goal ${goal.id} batch-close receipt is stale for deferred member ${memberId}`);
 		}
 	}
-	const close = qualityGateObject(qualityGateObject(event.qualityGateJson)?.validationBatchClose);
+	const close = readBatchClose(event.qualityGateJson);
 	const unionHash = String(qualityGateObject(close?.unionChangeSet)?.unionHash ?? "");
 	if (batch.unionHash !== unionHash)
 		throw new Error(`Goal ${goal.id} validation batch close receipt union hash is stale`);
@@ -1348,6 +1366,17 @@ function parseGoalStatus(value: unknown): UltragoalGoalStatus {
 	return status;
 }
 
+function normalizeCheckpointReceipt(value: unknown, label: string): UltragoalCompletionVerification | undefined {
+	const record = qualityGateObject(value);
+	if (!record) return undefined;
+	if (!Object.hasOwn(record, "batch")) return record as unknown as UltragoalCompletionVerification;
+	const { batch: _renamedBatch, ...receipt } = record;
+	return {
+		...receipt,
+		validationBatch: resolveStoredBatch(record, label),
+	} as unknown as UltragoalCompletionVerification;
+}
+
 function normalizePlan(raw: unknown): UltragoalPlan {
 	if (typeof raw !== "object" || raw === null) throw new Error("Invalid ultragoal plan: expected object");
 	const record = raw as JsonObject;
@@ -1364,9 +1393,10 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 		const objective = nonEmptyString(goalRecord.objective) ?? title;
 		const goalCreatedAt = nonEmptyString(goalRecord.createdAt) ?? createdAt;
 		const pipelineMetadata = normalizeSavedPipelineMetadata(goalRecord.pipelineMetadata, id);
-		const validationBatch = normalizeSavedValidationBatch(goalRecord.validationBatch, id);
+		const validationBatch = normalizeSavedValidationBatch(resolveStoredBatch(goalRecord, `Goal ${id}`), id);
+		const { batch: _renamedBatch, ...storedGoal } = goalRecord;
 		return {
-			...goalRecord,
+			...storedGoal,
 			id,
 			title,
 			objective,
@@ -1380,10 +1410,7 @@ function normalizePlan(raw: unknown): UltragoalPlan {
 				typeof goalRecord.steering === "object" && goalRecord.steering !== null
 					? (goalRecord.steering as Record<string, unknown>)
 					: undefined,
-			completionVerification:
-				typeof goalRecord.completionVerification === "object" && goalRecord.completionVerification !== null
-					? (goalRecord.completionVerification as UltragoalCompletionVerification)
-					: undefined,
+			completionVerification: normalizeCheckpointReceipt(goalRecord.completionVerification, `Goal ${id} receipt`),
 			pipelineMetadata,
 			validationBatch,
 		};
@@ -1929,7 +1956,7 @@ function successfulLinkedRows(ids: string[], map: Map<string, JsonObject>, field
 }
 
 export function normalizedEvidenceKind(row: JsonObject): string {
-	return requiredStringField(row, "kind", "executorQa.artifactRefs[]").toLowerCase().replaceAll("_", "-");
+	return requiredStringField(row, "kind", "verify.artifactRefs[]").toLowerCase().replaceAll("_", "-");
 }
 
 export function evidenceKindMatches(kind: string, words: string[]): boolean {
@@ -2273,10 +2300,10 @@ export {
 
 async function validateArtifactRefs(cwd: string, executorQa: JsonObject): Promise<Map<string, JsonObject>> {
 	void cwd;
-	const rows = requireObjectArray(executorQa.artifactRefs, "executorQa.artifactRefs");
-	const idMap = buildRowIdMap(rows, "executorQa.artifactRefs");
+	const rows = requireObjectArray(executorQa.artifactRefs, "verify.artifactRefs");
+	const idMap = buildRowIdMap(rows, "verify.artifactRefs");
 	for (const [index, row] of rows.entries()) {
-		const fieldName = `executorQa.artifactRefs[${index}]`;
+		const fieldName = `verify.artifactRefs[${index}]`;
 		requiredStringField(row, "kind", fieldName);
 		requiredStringField(row, "description", fieldName);
 	}
@@ -2288,10 +2315,10 @@ async function validateSurfaceEvidence(
 	executorQa: JsonObject,
 	artifactRefs: Map<string, JsonObject>,
 ): Promise<Map<string, JsonObject>> {
-	const rows = requireObjectArray(executorQa.surfaceEvidence, "executorQa.surfaceEvidence");
-	const idMap = buildRowIdMap(rows, "executorQa.surfaceEvidence");
+	const rows = requireObjectArray(executorQa.surfaceEvidence, "verify.surfaceEvidence");
+	const idMap = buildRowIdMap(rows, "verify.surfaceEvidence");
 	for (const [index, row] of rows.entries()) {
-		const fieldName = `executorQa.surfaceEvidence[${index}]`;
+		const fieldName = `verify.surfaceEvidence[${index}]`;
 		const status = optionalStatusField(row, fieldName);
 		requiredStringField(row, "contractRef", fieldName);
 		if (status === NOT_APPLICABLE_STATUS) {
@@ -2314,7 +2341,7 @@ async function validateSurfaceEvidence(
 			let hasPassingReplay = false;
 			for (const artifactId of artifactIds) {
 				const artifact = artifactRefs.get(artifactId)!;
-				const artifactField = `executorQa.artifactRefs.${artifactId}`;
+				const artifactField = `verify.artifactRefs.${artifactId}`;
 				const record = await readCliReplayRecord(cwd, artifact, artifactField);
 				if (!record) continue;
 				if (record.replayExempt !== undefined) {
@@ -2341,11 +2368,11 @@ async function validateSurfaceEvidence(
 				const record = await readCliReplayRecord(
 					cwd,
 					artifactRefs.get(artifactId)!,
-					`executorQa.artifactRefs.${artifactId}`,
+					`verify.artifactRefs.${artifactId}`,
 				);
 				if (record?.replayExempt !== undefined) continue;
 			}
-			await validateArtifactProof(cwd, artifactRefs.get(artifactId)!, `executorQa.artifactRefs.${artifactId}`, {
+			await validateArtifactProof(cwd, artifactRefs.get(artifactId)!, `verify.artifactRefs.${artifactId}`, {
 				surfaceFamily: family,
 				live: isLiveSurfaceFamily(family),
 			});
@@ -2358,10 +2385,10 @@ function validateAdversarialCases(
 	executorQa: JsonObject,
 	artifactRefs: Map<string, JsonObject>,
 ): Map<string, JsonObject> {
-	const rows = requireObjectArray(executorQa.adversarialCases, "executorQa.adversarialCases");
-	const idMap = buildRowIdMap(rows, "executorQa.adversarialCases");
+	const rows = requireObjectArray(executorQa.adversarialCases, "verify.adversarialCases");
+	const idMap = buildRowIdMap(rows, "verify.adversarialCases");
 	for (const [index, row] of rows.entries()) {
-		const fieldName = `executorQa.adversarialCases[${index}]`;
+		const fieldName = `verify.adversarialCases[${index}]`;
 		const status = optionalStatusField(row, fieldName);
 		if (status === NOT_APPLICABLE_STATUS) {
 			throw new Error(`qualityGate ${fieldName}.status must not be not_applicable`);
@@ -2387,16 +2414,14 @@ async function validateMandatoryComputerAdversarialCases(
 ): Promise<void> {
 	const linkedCaseIds = new Set<string>();
 	for (const [index, row] of contractCoverage.entries()) {
-		const ids = optionalStringLinks(row, "adversarialCaseRefs", `executorQa.contractCoverage[${index}]`);
+		const ids = optionalStringLinks(row, "adversarialCaseRefs", `verify.contractCoverage[${index}]`);
 		for (const id of ids ?? []) linkedCaseIds.add(normalizeAdversarialCaseId(id));
 	}
 	for (const caseId of MANDATORY_COMPUTER_CASE_IDS) {
 		const row = adversarialCases.get(caseId);
 		if (!row)
-			throw new Error(
-				`COMPUTER_REDTEAM_CASE_MISSING: qualityGate executorQa.adversarialCases must include ${caseId}`,
-			);
-		if (optionalStatusField(row, `executorQa.adversarialCases.${caseId}`) === NOT_APPLICABLE_STATUS) {
+			throw new Error(`COMPUTER_REDTEAM_CASE_MISSING: qualityGate verify.adversarialCases must include ${caseId}`);
+		if (optionalStatusField(row, `verify.adversarialCases.${caseId}`) === NOT_APPLICABLE_STATUS) {
 			throw new Error(
 				`COMPUTER_REDTEAM_CASE_NOT_APPLICABLE: mandatory computer adversarial case ${caseId} must not be not_applicable`,
 			);
@@ -2406,7 +2431,7 @@ async function validateMandatoryComputerAdversarialCases(
 				`COMPUTER_REDTEAM_CASE_UNLINKED: mandatory computer adversarial case ${caseId} must be linked from contractCoverage.adversarialCaseRefs`,
 			);
 		}
-		const artifactIds = requireStringLinks(row.artifactRefs, `executorQa.adversarialCases.${caseId}.artifactRefs`);
+		const artifactIds = requireStringLinks(row.artifactRefs, `verify.adversarialCases.${caseId}.artifactRefs`);
 		let hasValidLiveNativeProof = false;
 		let sawInlineOnly = false;
 		let sawReceiptOnly = false;
@@ -2415,9 +2440,9 @@ async function validateMandatoryComputerAdversarialCases(
 			const artifact = artifactRefs.get(artifactId);
 			if (!artifact)
 				throw new Error(
-					`qualityGate executorQa.adversarialCases.${caseId}.artifactRefs references unknown id ${artifactId}`,
+					`qualityGate verify.adversarialCases.${caseId}.artifactRefs references unknown id ${artifactId}`,
 				);
-			const fieldName = `executorQa.artifactRefs.${artifactId}`;
+			const fieldName = `verify.artifactRefs.${artifactId}`;
 			if (artifact.inlineEvidence !== undefined && !nonEmptyString(artifact.path)) sawInlineOnly = true;
 			if (
 				(artifact.verifiedReceipt !== undefined || artifact.receipt !== undefined) &&
@@ -2465,11 +2490,11 @@ function validateContractCoverage(
 	adversarialCases: Map<string, JsonObject>,
 	artifactRefs: Map<string, JsonObject>,
 ): JsonObject[] {
-	const rows = requireObjectArray(executorQa.contractCoverage, "executorQa.contractCoverage");
-	buildRowIdMap(rows, "executorQa.contractCoverage");
+	const rows = requireObjectArray(executorQa.contractCoverage, "verify.contractCoverage");
+	buildRowIdMap(rows, "verify.contractCoverage");
 	let hasSuccessfulContractCoverage = false;
 	for (const [index, row] of rows.entries()) {
-		const fieldName = `executorQa.contractCoverage[${index}]`;
+		const fieldName = `verify.contractCoverage[${index}]`;
 		requiredStringField(row, "contractRef", fieldName);
 		const status = optionalStatusField(row, fieldName);
 		if (status === NOT_APPLICABLE_STATUS) {
@@ -2512,7 +2537,7 @@ function validateContractCoverage(
 	}
 	if (!hasSuccessfulContractCoverage) {
 		throw new Error(
-			"qualityGate executorQa.contractCoverage must include at least one row with status covered, passed, or verified",
+			"qualityGate verify.contractCoverage must include at least one row with status covered, passed, or verified",
 		);
 	}
 	return rows;
@@ -2618,44 +2643,43 @@ function validateDeferredCompletionQualityGate(
 	metadata: UltragoalValidationBatchMetadata,
 	changeSet?: UltragoalChangeSet,
 ): void {
-	const allowedKeys = new Set(["deferredToBatch"]);
+	const allowedKeys = new Set(["batchDeferred"]);
 	const unsupportedKeys = Object.keys(gate).filter(key => !allowedKeys.has(key));
 	if (unsupportedKeys.length > 0)
 		throw new Error(`deferred qualityGate contains unsupported keys: ${unsupportedKeys.join(", ")}`);
-	const deferred = qualityGateObject(gate.deferredToBatch);
-	if (!deferred) throw new Error("deferred qualityGate requires deferredToBatch object");
-	if (deferred.kind !== "validation-batch-deferred")
-		throw new Error("deferredToBatch.kind must be validation-batch-deferred");
-	requireValidationBatchTuple(metadata, deferred, "deferredToBatch");
+	const deferred = qualityGateObject(gate.batchDeferred);
+	if (!deferred) throw new Error("deferred qualityGate requires batchDeferred object");
+	if (deferred.kind !== "batch-deferred") throw new Error("batchDeferred.kind must be batch-deferred");
+	requireValidationBatchTuple(metadata, deferred, "batchDeferred");
 	if (goal.id === metadata.finalGoalId)
-		throw new Error("final validation batch goal cannot use deferredToBatch quality gate");
+		throw new Error("final validation batch goal cannot use batchDeferred quality gate");
 	const deferredLanes = stringArray(deferred.deferredLanes)?.filter(Boolean).sort();
-	if (deferredLanes?.join(",") !== "architectReview,executorQa")
-		throw new Error("deferredToBatch.deferredLanes must be architectReview and executorQa");
+	if (deferredLanes?.length !== 2 || deferredLanes[0] !== "review" || deferredLanes[1] !== "verify")
+		throw new Error("batchDeferred.deferredLanes must be review and verify");
 	const targeted = qualityGateObject(deferred.targetedVerification);
 	if (!targeted || targeted.status !== PASSED_STATUS || !nonEmptyStringArray(targeted.commands))
-		throw new Error("deferredToBatch.targetedVerification must pass with non-empty commands");
-	requireNonEmptyString(targeted.evidence, "deferredToBatch.targetedVerification.evidence");
-	const cleaner = qualityGateObject(deferred.aiSlopCleaner);
-	if (!cleaner || cleaner.status !== PASSED_STATUS) throw new Error("deferredToBatch.aiSlopCleaner must pass");
-	requireNonEmptyString(cleaner.evidence, "deferredToBatch.aiSlopCleaner.evidence");
-	const iteration = qualityGateObject(deferred.iteration);
+		throw new Error("batchDeferred.targetedVerification must pass with non-empty commands");
+	requireNonEmptyString(targeted.evidence, "batchDeferred.targetedVerification.evidence");
+	const cleaner = qualityGateObject(deferred.cleanup);
+	if (!cleaner || cleaner.status !== PASSED_STATUS) throw new Error("batchDeferred.cleanup must pass");
+	requireNonEmptyString(cleaner.evidence, "batchDeferred.cleanup.evidence");
+	const iteration = qualityGateObject(deferred.rerun);
 	if (!iteration || iteration.status !== PASSED_STATUS || iteration.fullRerun !== true)
-		throw new Error("deferredToBatch.iteration must pass with fullRerun true");
+		throw new Error("batchDeferred.rerun must pass with fullRerun true");
 	if (!nonEmptyStringArray(iteration.rerunCommands))
-		throw new Error("deferredToBatch.iteration.rerunCommands must be non-empty");
-	requireNonEmptyString(iteration.evidence, "deferredToBatch.iteration.evidence");
-	requireEmptyBlockers(iteration.blockers, "deferredToBatch.iteration.blockers");
+		throw new Error("batchDeferred.rerun.rerunCommands must be non-empty");
+	requireNonEmptyString(iteration.evidence, "batchDeferred.rerun.evidence");
+	requireEmptyBlockers(iteration.blockers, "batchDeferred.rerun.blockers");
 	const declaredChangeSet = qualityGateObject(deferred.changeSet);
-	if (!declaredChangeSet) throw new Error("deferredToBatch.changeSet is required");
+	if (!declaredChangeSet) throw new Error("batchDeferred.changeSet is required");
 	if (declaredChangeSet.memberGoalId !== goal.id)
-		throw new Error("deferredToBatch.changeSet.memberGoalId must label the checkpointed goal");
+		throw new Error("batchDeferred.changeSet.memberGoalId must label the checkpointed goal");
 	if (declaredChangeSet.cumulativeFromBase !== true)
-		throw new Error("deferredToBatch.changeSet.cumulativeFromBase must be true");
-	const paths = canonicalChangeSetRows(declaredChangeSet.paths, "deferredToBatch.changeSet.paths");
-	requireChangeSetCoverage(changeSet, paths, "deferredToBatch.changeSet.paths");
+		throw new Error("batchDeferred.changeSet.cumulativeFromBase must be true");
+	const paths = canonicalChangeSetRows(declaredChangeSet.paths, "batchDeferred.changeSet.paths");
+	requireChangeSetCoverage(changeSet, paths, "batchDeferred.changeSet.paths");
 	if (declaredChangeSet.changeSetHash !== changeSetHashForPaths(paths))
-		throw new Error("deferredToBatch.changeSet.changeSetHash does not match declared paths");
+		throw new Error("batchDeferred.changeSet.changeSetHash does not match declared paths");
 }
 async function validateCompletionQualityGate(
 	cwd: string,
@@ -2678,39 +2702,30 @@ async function validateCompletionQualityGate(
 		return;
 	}
 	if (batchMode && options.goal && options.goal.id === batchMode.finalGoalId) {
-		const allowedKeys = new Set([
-			"architectReview",
-			"executorQa",
-			"iteration",
-			"validationBatchClose",
-			"criticReview",
-		]);
+		const allowedKeys = new Set(["review", "verify", "rerun", "batchClose", "signoff"]);
 		const unsupportedKeys = Object.keys(gate).filter(key => !allowedKeys.has(key));
 		if (unsupportedKeys.length > 0)
 			throw new Error(`qualityGate contains unsupported keys: ${unsupportedKeys.join(", ")}`);
-		if (!qualityGateObject(gate.validationBatchClose))
-			throw new Error("final validation batch goal requires validationBatchClose");
+		if (!qualityGateObject(gate.batchClose)) throw new Error("final validation batch goal requires batchClose");
 	}
 	const codeReview = qualityGateObject(gate.codeReview);
 	if (codeReview) {
 		throw new Error(
-			"checkpoint --status complete requires architect review approval through architectReview, executorQa, and iteration quality-gate evidence; legacy codeReview-only gates are not sufficient",
+			"checkpoint --status complete requires architect review approval through review, verify, and rerun quality-gate evidence; legacy codeReview-only gates are not sufficient",
 		);
 	}
 	const allowedKeys = new Set(
-		batchMode
-			? ["architectReview", "executorQa", "iteration", "validationBatchClose", "criticReview"]
-			: ["architectReview", "executorQa", "iteration", "criticReview"],
+		batchMode ? ["review", "verify", "rerun", "batchClose", "signoff"] : ["review", "verify", "rerun", "signoff"],
 	);
 	const unsupportedKeys = Object.keys(gate).filter(key => !allowedKeys.has(key));
 	if (unsupportedKeys.length > 0) {
 		throw new Error(`qualityGate contains unsupported keys: ${unsupportedKeys.join(", ")}`);
 	}
-	const architectReview = qualityGateObject(gate.architectReview);
-	const executorQa = qualityGateObject(gate.executorQa);
-	const iteration = qualityGateObject(gate.iteration);
+	const architectReview = qualityGateObject(gate.review);
+	const executorQa = qualityGateObject(gate.verify);
+	const iteration = qualityGateObject(gate.rerun);
 	if (!architectReview || !executorQa || !iteration) {
-		throw new Error("qualityGate requires architectReview, executorQa, and iteration objects");
+		throw new Error("qualityGate requires review, verify, and rerun objects");
 	}
 	if (isFinalAggregate) {
 		if (
@@ -2722,14 +2737,14 @@ async function validateCompletionQualityGate(
 				"checkpoint --status complete blocked: terminal-critic ceiling reached; requires human/leader skc ultragoal record-critic-gate-override before completion",
 			);
 		}
-		const criticReview = qualityGateObject(gate.criticReview);
+		const criticReview = qualityGateObject(gate.signoff);
 		if (criticReview?.verdict !== "OKAY") {
 			throw new Error(
-				"checkpoint --status complete (final aggregate) requires criticReview with verdict OKAY, non-empty evidence, and empty blockers",
+				"checkpoint --status complete (final aggregate) requires signoff with verdict OKAY, non-empty evidence, and empty blockers",
 			);
 		}
-		requireNonEmptyString(criticReview.evidence, "criticReview.evidence");
-		requireEmptyBlockers(criticReview.blockers, "criticReview.blockers");
+		requireNonEmptyString(criticReview.evidence, "signoff.evidence");
+		requireEmptyBlockers(criticReview.blockers, "signoff.blockers");
 	}
 	if (
 		architectReview.architectureStatus !== CLEAN_ARCHITECT_STATUS ||
@@ -2738,35 +2753,35 @@ async function validateCompletionQualityGate(
 		architectReview.recommendation !== APPROVE_RECOMMENDATION
 	) {
 		throw new Error(
-			"checkpoint --status complete requires architect review approval: architectReview architecture/product/code must be CLEAR and recommendation must be APPROVE",
+			"checkpoint --status complete requires architect review approval: review architecture/product/code must be CLEAR and recommendation must be APPROVE",
 		);
 	}
 	if (!nonEmptyStringArray(architectReview.commands)) {
-		throw new Error("qualityGate architectReview.commands must be a non-empty string array");
+		throw new Error("qualityGate review.commands must be a non-empty string array");
 	}
-	requireNonEmptyString(architectReview.evidence, "architectReview.evidence");
-	requireEmptyBlockers(architectReview.blockers, "architectReview.blockers");
+	requireNonEmptyString(architectReview.evidence, "review.evidence");
+	requireEmptyBlockers(architectReview.blockers, "review.blockers");
 	if (
 		executorQa.status !== PASSED_STATUS ||
 		executorQa.e2eStatus !== PASSED_STATUS ||
-		executorQa.redTeamStatus !== PASSED_STATUS
+		executorQa.attackStatus !== PASSED_STATUS
 	) {
-		throw new Error("qualityGate executorQa status, e2eStatus, and redTeamStatus must be passed");
+		throw new Error("qualityGate verify status, e2eStatus, and attackStatus must be passed");
 	}
-	if (!nonEmptyStringArray(executorQa.e2eCommands) || !nonEmptyStringArray(executorQa.redTeamCommands)) {
-		throw new Error("qualityGate executorQa e2eCommands and redTeamCommands must be non-empty string arrays");
+	if (!nonEmptyStringArray(executorQa.e2eCommands) || !nonEmptyStringArray(executorQa.attackCommands)) {
+		throw new Error("qualityGate verify e2eCommands and attackCommands must be non-empty string arrays");
 	}
-	requireNonEmptyString(executorQa.evidence, "executorQa.evidence");
-	requireEmptyBlockers(executorQa.blockers, "executorQa.blockers");
+	requireNonEmptyString(executorQa.evidence, "verify.evidence");
+	requireEmptyBlockers(executorQa.blockers, "verify.blockers");
 	await validateExecutorQaRedTeamEvidence(cwd, executorQa, { changeSet: options.changeSet });
 	if (iteration.status !== PASSED_STATUS || iteration.fullRerun !== true) {
-		throw new Error("qualityGate iteration must be passed with fullRerun true");
+		throw new Error("qualityGate rerun must be passed with fullRerun true");
 	}
 	if (!nonEmptyStringArray(iteration.rerunCommands)) {
-		throw new Error("qualityGate iteration.rerunCommands must be a non-empty string array");
+		throw new Error("qualityGate rerun.rerunCommands must be a non-empty string array");
 	}
-	requireNonEmptyString(iteration.evidence, "iteration.evidence");
-	requireEmptyBlockers(iteration.blockers, "iteration.blockers");
+	requireNonEmptyString(iteration.evidence, "rerun.evidence");
+	requireEmptyBlockers(iteration.blockers, "rerun.blockers");
 	if (batchMode && options.goal && options.plan && options.ledger) {
 		validateBatchCloseQualityGate(gate, options.plan, batchMode, options.ledger, options.changeSet);
 	}
@@ -2779,48 +2794,48 @@ function validateBatchCloseQualityGate(
 	ledger: readonly UltragoalLedgerEvent[],
 	changeSet?: UltragoalChangeSet,
 ): void {
-	const close = qualityGateObject(gate.validationBatchClose);
-	if (!close) throw new Error("validationBatchClose is required");
-	if (close.schemaVersion !== 1 || close.kind !== "validation-batch-close")
-		throw new Error("validationBatchClose.kind must be validation-batch-close");
+	const close = qualityGateObject(gate.batchClose);
+	if (!close) throw new Error("batchClose is required");
+	if (close.schemaVersion !== 1 || close.kind !== "batch-close")
+		throw new Error("batchClose.kind must be batch-close");
 	if (close.batchId !== metadata.batchId || close.finalGoalId !== metadata.finalGoalId)
-		throw new Error("validationBatchClose tuple must match durable validationBatch");
+		throw new Error("batchClose tuple must match durable batch metadata");
 	const memberIds = stringArray(close.memberIds);
 	if (
 		!memberIds ||
 		memberIds.length !== metadata.memberIds.length ||
 		memberIds.some((id, index) => id !== metadata.memberIds[index])
 	)
-		throw new Error("validationBatchClose.memberIds must match durable validationBatch order");
+		throw new Error("batchClose.memberIds must match durable batch order");
 	const memberMetadataHashes = qualityGateObject(close.memberMetadataHashes);
 	const memberChangeSetHashes = qualityGateObject(qualityGateObject(close.unionChangeSet)?.memberChangeSetHashes);
 	if (!memberMetadataHashes || !memberChangeSetHashes)
-		throw new Error("validationBatchClose member metadata and change-set hashes are required");
+		throw new Error("batchClose member metadata and change-set hashes are required");
 	const seenReceipts = new Set<string>();
 	const receiptRows = Array.isArray(close.memberReceipts) ? close.memberReceipts : [];
 	const nonFinalIds = metadata.memberIds.filter(memberId => memberId !== metadata.finalGoalId);
 	for (const memberId of metadata.memberIds) {
 		const member = plan.goals.find(item => item.id === memberId);
-		if (!member?.validationBatch) throw new Error(`validationBatchClose references missing batch member ${memberId}`);
+		if (!member?.validationBatch) throw new Error(`batchClose references missing batch member ${memberId}`);
 		if (member.validationBatch.metadataHash !== memberMetadataHashes[memberId])
-			throw new Error(`validationBatchClose.memberMetadataHashes.${memberId} does not match durable metadata`);
+			throw new Error(`batchClose.memberMetadataHashes.${memberId} does not match durable metadata`);
 		if (memberId !== metadata.finalGoalId && member.status !== "complete")
-			throw new Error(`validationBatchClose cannot close before ${memberId} is complete`);
+			throw new Error(`batchClose cannot close before ${memberId} is complete`);
 	}
 	if (receiptRows.length !== nonFinalIds.length)
-		throw new Error("validationBatchClose.memberReceipts must list every non-final member exactly once");
+		throw new Error("batchClose.memberReceipts must list every non-final member exactly once");
 	for (const row of receiptRows) {
 		if (typeof row !== "object" || row === null || Array.isArray(row))
-			throw new Error("validationBatchClose.memberReceipts rows must be objects");
+			throw new Error("batchClose.memberReceipts rows must be objects");
 		const record = row as JsonObject;
 		const memberId = nonEmptyString(record.goalId);
 		if (!memberId || !nonFinalIds.includes(memberId))
-			throw new Error("validationBatchClose.memberReceipts contains invalid member goalId");
+			throw new Error("batchClose.memberReceipts contains invalid member goalId");
 		if (seenReceipts.has(memberId))
-			throw new Error(`validationBatchClose.memberReceipts contains duplicate member ${memberId}`);
+			throw new Error(`batchClose.memberReceipts contains duplicate member ${memberId}`);
 		seenReceipts.add(memberId);
 		const member = plan.goals.find(item => item.id === memberId)!;
-		const receipt = requireDeferredMemberReceiptFresh(plan, ledger, member, "validationBatchClose.memberReceipts");
+		const receipt = requireDeferredMemberReceiptFresh(plan, ledger, member, "batchClose.memberReceipts");
 		if (
 			record.role !== "deferred-member" ||
 			record.receiptId !== receipt.receiptId ||
@@ -2828,24 +2843,21 @@ function validateBatchCloseQualityGate(
 			record.changeSetHash !== receipt.validationBatch.changeSetHash ||
 			record.checkpointLedgerEventId !== receipt.checkpointLedgerEventId
 		) {
-			throw new Error(`validationBatchClose.memberReceipts.${memberId} does not match deferred receipt`);
+			throw new Error(`batchClose.memberReceipts.${memberId} does not match deferred receipt`);
 		}
 		if (memberChangeSetHashes[memberId] !== receipt.validationBatch.changeSetHash)
-			throw new Error(
-				`validationBatchClose.unionChangeSet.memberChangeSetHashes.${memberId} does not match deferred receipt`,
-			);
+			throw new Error(`batchClose.unionChangeSet.memberChangeSetHashes.${memberId} does not match deferred receipt`);
 	}
 	if (seenReceipts.size !== nonFinalIds.length)
-		throw new Error("validationBatchClose.memberReceipts is missing a non-final member");
+		throw new Error("batchClose.memberReceipts is missing a non-final member");
 	const union = qualityGateObject(close.unionChangeSet);
-	if (union?.source !== "validation-batch")
-		throw new Error("validationBatchClose.unionChangeSet.source must be validation-batch");
-	const unionPaths = canonicalChangeSetRows(union.paths, "validationBatchClose.unionChangeSet.paths");
-	requireChangeSetCoverage(changeSet, unionPaths, "validationBatchClose.unionChangeSet.paths");
+	if (union?.source !== "batch") throw new Error("batchClose.unionChangeSet.source must be batch");
+	const unionPaths = canonicalChangeSetRows(union.paths, "batchClose.unionChangeSet.paths");
+	requireChangeSetCoverage(changeSet, unionPaths, "batchClose.unionChangeSet.paths");
 	const finalHash = changeSetHashForPaths(unionPaths);
 	if (memberChangeSetHashes[metadata.finalGoalId] !== finalHash)
 		throw new Error(
-			"validationBatchClose.unionChangeSet.memberChangeSetHashes final member hash does not match current change set",
+			"batchClose.unionChangeSet.memberChangeSetHashes final member hash does not match current change set",
 		);
 	if (
 		union.unionHash !==
@@ -2854,8 +2866,8 @@ function validateBatchCloseQualityGate(
 			paths: unionPaths.map(row => ({ path: row.path, status: row.status, oldPath: row.oldPath })),
 		})
 	)
-		throw new Error("validationBatchClose.unionChangeSet.unionHash does not match declared union");
-	requireNonEmptyString(close.coverageEvidence, "validationBatchClose.coverageEvidence");
+		throw new Error("batchClose.unionChangeSet.unionHash does not match declared union");
+	requireNonEmptyString(close.coverageEvidence, "batchClose.coverageEvidence");
 }
 
 function hydrateReviewedBatchReplacementClose(input: {
@@ -2866,7 +2878,7 @@ function hydrateReviewedBatchReplacementClose(input: {
 	ledger: readonly UltragoalLedgerEvent[];
 	changeSet?: UltragoalChangeSet;
 }): JsonObject {
-	const requested = qualityGateObject(input.gate.validationBatchClose);
+	const requested = qualityGateObject(input.gate.batchClose);
 	if (requested?.kind !== "review-blocker-replacement-close") return input.gate;
 	const expectedKeys = new Set(["schemaVersion", "kind", "replacementGoalId", "coverageEvidence"]);
 	if (Object.keys(requested).some(key => !expectedKeys.has(key)))
@@ -2973,16 +2985,16 @@ function hydrateReviewedBatchReplacementClose(input: {
 	});
 	return {
 		...input.gate,
-		validationBatchClose: {
+		batchClose: {
 			schemaVersion: 1,
-			kind: "validation-batch-close",
+			kind: "batch-close",
 			batchId: input.metadata.batchId,
 			finalGoalId: input.metadata.finalGoalId,
 			memberIds: [...input.metadata.memberIds],
 			memberMetadataHashes,
 			memberReceipts,
 			unionChangeSet: {
-				source: "validation-batch",
+				source: "batch",
 				memberChangeSetHashes,
 				paths,
 				unionHash,
@@ -3000,34 +3012,48 @@ async function readRequiredCompletionQualityGate(
 		goal?: UltragoalGoal;
 		ledger?: readonly UltragoalLedgerEvent[];
 	} = {},
+	onLegacyKeys?: (keys: readonly string[]) => void,
 ): Promise<unknown> {
 	if (!value?.trim()) {
-		throw new Error(
-			"complete checkpoints require --quality-gate-json with architectReview, executorQa, and iteration evidence",
-		);
+		throw new Error("complete checkpoints require --quality-gate-json with review, verify, and rerun evidence");
 	}
 	const gate = await readStructuredValue(cwd, value);
 	const gateObject = qualityGateObject(gate);
 	if (!gateObject) throw new Error("qualityGate must be a JSON object");
+	const { gate: canonical, legacyKeys } = normalizeQualityGateInput(gateObject);
+	if (legacyKeys.length) onLegacyKeys?.(legacyKeys);
 	const validationBatch = options.goal ? requireFreshValidationBatchMetadata(options.goal) : undefined;
 	const hydratedGate =
 		validationBatch && options.plan && options.goal && options.ledger
 			? hydrateReviewedBatchReplacementClose({
-					gate: gateObject,
+					gate: canonical,
 					plan: options.plan,
 					goal: options.goal,
 					metadata: validationBatch,
 					ledger: options.ledger,
 					changeSet: options.changeSet,
 				})
-			: gateObject;
+			: canonical;
 	await validateCompletionQualityGate(cwd, hydratedGate, {
 		changeSet: options.changeSet,
 		plan: options.plan,
 		goal: options.goal,
 		ledger: options.ledger,
 	});
-	return hydratedGate;
+	return toStorageGate(hydratedGate);
+}
+
+async function readOptionalCheckpointGate(
+	cwd: string,
+	value: string,
+	onLegacyKeys?: (keys: readonly string[]) => void,
+): Promise<unknown> {
+	const raw = await readStructuredValue(cwd, value);
+	const record = qualityGateObject(raw);
+	if (!record) return raw;
+	const { gate, legacyKeys } = normalizeQualityGateInput(record);
+	if (legacyKeys.length) onLegacyKeys?.(legacyKeys);
+	return toStorageGate(gate);
 }
 
 function validatePipelineCheckpointSafety(
@@ -3096,6 +3122,7 @@ export async function checkpointUltragoalGoal(input: {
 	status: UltragoalGoalStatus;
 	evidence: string;
 	qualityGateJson?: string;
+	onLegacyKeys?: (keys: readonly string[]) => void;
 }): Promise<UltragoalPlan> {
 	const sessionId = await resolveUltragoalOwnershipSession(input.cwd, null);
 	const plan = await readUltragoalPlan(input.cwd, sessionId);
@@ -3212,6 +3239,10 @@ export async function checkpointUltragoalGoal(input: {
 		// would corrupt (mirrors the ralplan #638 guard). Requiring a matching ledger row means an
 		// interrupted prior write (plan persisted, ledger append lost) still re-appends the event
 		// instead of silently dropping it.
+		// Keep replay read-only, but still reject conflicting aliases in submitted input.
+		if (input.qualityGateJson !== undefined) {
+			await readOptionalCheckpointGate(input.cwd, input.qualityGateJson, input.onLegacyKeys);
+		}
 		return plan;
 	}
 	const changeSet = input.status === "complete" ? await computeCheckpointChangeSet(input.cwd) : undefined;
@@ -3221,14 +3252,19 @@ export async function checkpointUltragoalGoal(input: {
 	}
 	const qualityGateJson =
 		input.status === "complete"
-			? await readRequiredCompletionQualityGate(input.cwd, input.qualityGateJson, {
-					changeSet,
-					plan,
-					goal,
-					ledger: ledgerBefore,
-				})
+			? await readRequiredCompletionQualityGate(
+					input.cwd,
+					input.qualityGateJson,
+					{
+						changeSet,
+						plan,
+						goal,
+						ledger: ledgerBefore,
+					},
+					input.onLegacyKeys,
+				)
 			: input.qualityGateJson
-				? await readStructuredValue(input.cwd, input.qualityGateJson)
+				? await readOptionalCheckpointGate(input.cwd, input.qualityGateJson, input.onLegacyKeys)
 				: undefined;
 	const now = new Date().toISOString();
 	const beforeStatus = goal.status;
@@ -3288,6 +3324,7 @@ export interface UltragoalCheckpointContinuation {
 	startedNext: boolean;
 	allComplete: boolean;
 	incompleteGoals: UltragoalGoal[];
+	legacyKeysNormalized?: string[];
 }
 
 export async function checkpointAndContinueUltragoalGoal(input: {
@@ -3299,7 +3336,9 @@ export async function checkpointAndContinueUltragoalGoal(input: {
 	advanceNext?: boolean;
 	retryFailed?: boolean;
 }): Promise<UltragoalCheckpointContinuation> {
-	let plan = await checkpointUltragoalGoal(input);
+	const legacyKeys: string[] = [];
+	let plan = await checkpointUltragoalGoal({ ...input, onLegacyKeys: keys => legacyKeys.push(...keys) });
+	const legacyKeysNormalized = legacyKeys.length ? legacyKeys : undefined;
 	const checkpointedGoal = plan.goals.find(goal => goal.id === input.goalId);
 	if (!checkpointedGoal) throw new Error(`No ultragoal goal found for ${input.goalId}.`);
 	if (input.status === "complete" && input.advanceNext === true) {
@@ -3315,6 +3354,7 @@ export async function checkpointAndContinueUltragoalGoal(input: {
 				startedNext: Boolean(started.goal),
 				allComplete: afterAdvance.allComplete,
 				incompleteGoals: afterAdvance.incompleteGoals,
+				legacyKeysNormalized,
 			};
 		}
 	}
@@ -3326,6 +3366,7 @@ export async function checkpointAndContinueUltragoalGoal(input: {
 		startedNext: false,
 		allComplete: state.allComplete,
 		incompleteGoals: state.incompleteGoals,
+		legacyKeysNormalized,
 	};
 }
 
@@ -3920,15 +3961,19 @@ function parseReviewMode(value: string | undefined): UltragoalReviewMode {
 	throw new Error("review --mode must be review-only or review-start");
 }
 
-async function readOptionalExecutorQa(cwd: string, value: string | undefined): Promise<JsonObject> {
+async function readOptionalExecutorQa(
+	cwd: string,
+	value: string | undefined,
+	legacyKeys: string[],
+): Promise<JsonObject> {
 	if (!value) {
 		return {
 			status: "passed",
 			e2eStatus: "passed",
-			redTeamStatus: "passed",
+			attackStatus: "passed",
 			evidence: "review evidence bundle was not supplied; runtime reports this as a finding",
 			e2eCommands: ["skc ultragoal review"],
-			redTeamCommands: ["skc ultragoal review"],
+			attackCommands: ["skc voyage review"],
 			artifactRefs: [],
 			contractCoverage: [],
 			surfaceEvidence: [],
@@ -3938,9 +3983,11 @@ async function readOptionalExecutorQa(cwd: string, value: string | undefined): P
 	}
 	const structured = await readStructuredValue(cwd, value);
 	if (typeof structured !== "object" || structured === null || Array.isArray(structured)) {
-		throw new Error("review --executor-qa-json must resolve to an executorQa object");
+		throw new Error("review --verify-json must resolve to a verify object");
 	}
-	return structured as JsonObject;
+	const normalized = normalizeVerifyInput(structured as JsonObject);
+	legacyKeys.push(...normalized.legacyKeys);
+	return normalized.verify;
 }
 
 import {
@@ -4066,17 +4113,17 @@ function findingFromError(error: unknown): UltragoalReviewFinding {
 
 function executorQaBlockers(executorQa: JsonObject): UltragoalReviewFinding[] {
 	const blockers = nonEmptyStringArray(executorQa.blockers);
-	return (blockers ?? []).map(message => ({ severity: "blocker", message: `executorQa.blockers: ${message}` }));
+	return (blockers ?? []).map(message => ({ severity: "blocker", message: `verify.blockers: ${message}` }));
 }
 
 const RESOLVED_REVIEW_BLOCKER_STATUSES = new Set<UltragoalGoalStatus>(["complete", "superseded"]);
 
 function findOpenReviewBlockerGoal(plan: UltragoalPlan, message: string): UltragoalGoal | undefined {
-	const objective = message.trim();
+	const objective = normalizeReviewFindingKey(message);
 	return plan.goals.find(
 		goal =>
 			goal.steering?.kind === "review_blocker" &&
-			goal.objective.trim() === objective &&
+			normalizeReviewFindingKey(goal.objective) === objective &&
 			!RESOLVED_REVIEW_BLOCKER_STATUSES.has(goal.status),
 	);
 }
@@ -4133,10 +4180,9 @@ export async function runUltragoalReview(cwd: string, args: readonly string[]): 
 	const specPath = flagValue(args, "--spec");
 	const { contractStrength, source } = await resolveReviewSource(cwd, args, specPath);
 	const changeSet = changeSetFromReviewSource(source);
-	const executorQa = await readOptionalExecutorQa(
-		cwd,
-		flagValue(args, "--executor-qa-json") ?? flagValue(args, "--executor-qa"),
-	);
+	const evidenceFlag = readAliasedFlag(args, "--verify-json", ["--verify"], ["--executor-qa-json", "--executor-qa"]);
+	const legacyKeys = evidenceFlag?.legacy ? [`${evidenceFlag.flag}->--verify-json`] : [];
+	const executorQa = await readOptionalExecutorQa(cwd, evidenceFlag?.value, legacyKeys);
 	const findings: UltragoalReviewFinding[] = [];
 	try {
 		await validateExecutorQaRedTeamEvidenceForReview(cwd, executorQa, { mode: "review", changeSet });
@@ -4163,16 +4209,61 @@ export async function runUltragoalReview(cwd: string, args: readonly string[]): 
 			findingCount: findings.length,
 		},
 		weakContractCapApplied,
+		...(legacyKeys.length ? { legacy_keys_normalized: legacyKeys } : {}),
 	};
 	if (mode === "review-start" && findings.length > 0)
 		result.blockerGoalIds = await recordReviewFindingGoals(cwd, findings);
 	return result;
 }
 
+function readAliasedFlag(
+	args: readonly string[],
+	name: string,
+	aliases: readonly string[],
+	legacy: readonly string[],
+	validateOtherOptions = false,
+): { flag: string; value: string; legacy: boolean } | undefined {
+	const spellings = new Set([name, ...aliases, ...legacy]);
+	let result: { flag: string; value: string; legacy: boolean } | undefined;
+	for (const { flag, value: candidate } of valueOptions(args, flag => validateOtherOptions || spellings.has(flag))) {
+		if (!validateOtherOptions && !spellings.has(flag)) continue;
+		if (candidate === undefined || !candidate.trim()) {
+			const requirement = spellings.has(flag) ? "a JSON value or file path" : "a value";
+			throw new Error(`${flag} requires ${requirement}`);
+		}
+		if (!spellings.has(flag)) continue;
+		if (result) throw new Error(`has both ${result.flag} and ${flag}; use ${name} only once`);
+		result = { flag, value: candidate, legacy: legacy.includes(flag) };
+	}
+	return result;
+}
+
+function* valueOptions(
+	args: readonly string[],
+	checkMissingValue?: (flag: string) => boolean,
+): Generator<{ flag: string; value: string | undefined }> {
+	for (let i = 0; i < args.length; i++) {
+		const token = args[i]!;
+		const equals = token.indexOf("=");
+		const flag = equals < 0 ? token : token.slice(0, equals);
+		if (!FLAGS_WITH_VALUES.has(flag)) continue;
+		const next = args[i + 1];
+		const nextFlag = next?.split("=", 1)[0];
+		const nextIsOption =
+			checkMissingValue?.(flag) &&
+			nextFlag !== undefined &&
+			(FLAGS_WITH_VALUES.has(nextFlag) || next === "--json" || next === "--from-stdin");
+		const value = equals >= 0 ? token.slice(equals + 1) : nextIsOption ? undefined : next;
+		if (equals < 0 && value !== undefined) i++;
+		yield { flag, value };
+	}
+}
+
 function flagValue(args: readonly string[], flag: string): string | undefined {
-	const index = args.indexOf(flag);
-	if (index < 0) return undefined;
-	return args[index + 1];
+	for (const option of valueOptions(args)) {
+		if (option.flag === flag) return option.value;
+	}
+	return undefined;
 }
 
 function hasFlag(args: readonly string[], flag: string): boolean {
@@ -4189,6 +4280,8 @@ const FLAGS_WITH_VALUES = new Set([
 	"--status",
 	"--evidence",
 	"--quality-gate-json",
+	"--verify-json",
+	"--verify",
 	"--executor-qa-json",
 	"--executor-qa",
 	"--pr",
@@ -4202,8 +4295,13 @@ const FLAGS_WITH_VALUES = new Set([
 	"--replacements-json",
 	"--order-json",
 	"--classification",
+	"--classification-event-id",
+	"--terminus",
+	"--blockers-json",
+	"--verdict",
 	"--goal-metadata-json",
 	"--validation-batch-json",
+	"--batch-json",
 	"--prior-goal-id",
 	"--next-goal-id",
 	"--review-handles-json",
@@ -4246,10 +4344,10 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 		args[0] === "help" ? args.find((arg, index) => index > 0 && !arg.startsWith("-")) : commandName(args);
 	if (subject === "checkpoint") {
 		return [
-			"Run native SKC Ultragoal workflow commands",
+			"Run native SKC Voyage workflow commands",
 			"",
 			"USAGE",
-			"  $ skc ultragoal checkpoint --goal-id <id> --status <status> --evidence <text> [FLAGS]",
+			"  $ skc voyage checkpoint --goal-id <id> --status <status> --evidence <text> [FLAGS]",
 			"",
 			"FLAGS",
 			"      --goal-id=<value>            Durable .skc/ultragoal goal id, e.g. G001",
@@ -4259,28 +4357,28 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"      --json                       Output a machine-readable receipt",
 			"",
 			"COMPLETE CHECKPOINT RECEIPTS",
-			"  --quality-gate-json must be an object with architectReview, executorQa, and iteration.",
-			"  executorQa.contractCoverage[] rows require an obligation field; description is not a substitute.",
+			"  --quality-gate-json must be an object with review, verify, and rerun (legacy keys accepted).",
+			"  verify.contractCoverage[] rows require an obligation field; description is not a substitute.",
 			"  Complete checkpoints validate the target durable goals.json record before writing a receipt.",
 			"",
 			"EXAMPLES",
-			'  $ skc ultragoal checkpoint --goal-id G001 --status blocked --evidence "waiting on review"',
-			'  $ skc ultragoal checkpoint --goal-id G001 --status complete --evidence "tests passed" --quality-gate-json ./quality-gate.json --json',
+			'  $ skc voyage checkpoint --goal-id G001 --status blocked --evidence "waiting on review"',
+			'  $ skc voyage checkpoint --goal-id G001 --status complete --evidence "tests passed" --quality-gate-json ./quality-gate.json --json',
 			"",
 		].join("\n");
 	}
 	if (subject === "review") {
 		return [
-			"Run native SKC Ultragoal workflow commands",
+			"Run native SKC Voyage workflow commands",
 			"",
 			"USAGE",
-			"  $ skc ultragoal review [--pr <n> | --branch <ref>] [--spec <path>] [--executor-qa-json <json-or-path>] [FLAGS]",
+			"  $ skc voyage review [--pr <n> | --branch <ref>] [--spec <path>] [--verify-json <json-or-path>] [FLAGS]",
 			"",
 			"FLAGS",
 			"      --pr=<value>                  Review a GitHub PR; falls back to local diff when gh is unavailable",
 			"      --branch=<value>              Review the current branch against a base ref",
 			"      --spec=<value>                Contract/spec override; enables strong-contract clean PASS eligibility",
-			"      --executor-qa-json=<value>    executorQa JSON string or path using checkpoint qualityGate.executorQa shape",
+			"      --verify-json=<value>         JSON or path using qualityGate.verify; --executor-qa-json remains accepted",
 			"      --mode=<value>                review-only|review-start (default review-only)",
 			"      --json                        Output the machine-readable verdict report",
 			"",
@@ -4291,10 +4389,10 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 	}
 	if (subject === "classify-blocker") {
 		return [
-			"Run native SKC Ultragoal workflow commands",
+			"Run native SKC Voyage workflow commands",
 			"",
 			"USAGE",
-			"  $ skc ultragoal classify-blocker --classification <human_blocked|resolvable> --evidence <text> [FLAGS]",
+			"  $ skc voyage classify-blocker --classification <human_blocked|resolvable> --evidence <text> [FLAGS]",
 			"",
 			"FLAGS",
 			"      --classification=<value>     Required. human_blocked must be the latest blocker_classified event; pause also requires a later bound clean pause terminal critic OKAY verdict; resolvable never authorizes pause",
@@ -4303,17 +4401,17 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"      --json                       Output a machine-readable receipt",
 			"",
 			"EXAMPLES",
-			'  $ skc ultragoal classify-blocker --classification resolvable --evidence "failing test can be fixed autonomously"',
-			'  $ skc ultragoal classify-blocker --classification human_blocked --evidence "user must provide production API credentials" --goal-id G001',
+			'  $ skc voyage classify-blocker --classification resolvable --evidence "failing test can be fixed autonomously"',
+			'  $ skc voyage classify-blocker --classification human_blocked --evidence "user must provide production API credentials" --goal-id G001',
 			"",
 		].join("\n");
 	}
 	if (subject === "record-critic-verdict") {
 		return [
-			"Run native SKC Ultragoal workflow commands",
+			"Run native SKC Voyage workflow commands",
 			"",
 			"USAGE",
-			"  $ skc ultragoal record-critic-verdict --terminus <completion|pause> --verdict <OKAY|ITERATE|REJECT> --evidence <text> [--blockers-json <json>] [--goal-id <id>] [--classification-event-id <id>]",
+			"  $ skc voyage record-critic-verdict --terminus <completion|pause> --verdict <OKAY|ITERATE|REJECT> --evidence <text> [--blockers-json <json>] [--goal-id <id>] [--classification-event-id <id>]",
 			"",
 			"FLAGS",
 			"      --terminus=<value>           Required. completion or pause",
@@ -4325,34 +4423,34 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"      --json                       Output a machine-readable receipt",
 			"",
 			"EXAMPLES",
-			'  $ skc ultragoal record-critic-verdict --terminus completion --verdict OKAY --evidence "all final-aggregate checkpoint evidence is current"',
+			'  $ skc voyage record-critic-verdict --terminus completion --verdict OKAY --evidence "all final-aggregate checkpoint evidence is current"',
 			"",
 		].join("\n");
 	}
 	if (subject === "record-critic-gate-override") {
 		return [
-			"Run native SKC Ultragoal workflow commands",
+			"Run native SKC Voyage workflow commands",
 			"",
 			"USAGE",
-			"  $ skc ultragoal record-critic-gate-override --evidence <text> [--json]",
+			"  $ skc voyage record-critic-gate-override --evidence <text> [--json]",
 			"",
 			"FLAGS",
 			"      --evidence=<value>           Required. Human/leader authorization evidence for the terminal-critic ceiling override",
 			"      --json                       Output a machine-readable receipt",
 			"",
 			"EXAMPLES",
-			'  $ skc ultragoal record-critic-gate-override --evidence "leader approved another terminal attempt after reviewing all five findings"',
+			'  $ skc voyage record-critic-gate-override --evidence "leader approved another terminal attempt after reviewing all five findings"',
 			"",
 		].join("\n");
 	}
 	if (subject === "succession") {
 		return [
-			"Run native SKC Ultragoal workflow commands",
+			"Run native SKC Voyage workflow commands",
 			"",
 			"USAGE",
-			"  $ skc ultragoal succession offer --target-repo <path> --goal-id <id> [--goal-id <id> ...] --authorize <statement> --authorized-by <identity> [--json]",
-			"  $ skc ultragoal succession adopt --offer <path> [--skc-goal-mode aggregate|per-story] [--json]",
-			"  $ skc ultragoal succession status [--json]",
+			"  $ skc voyage succession offer --target-repo <path> --goal-id <id> [--goal-id <id> ...] --authorize <statement> --authorized-by <identity> [--json]",
+			"  $ skc voyage succession adopt --offer <path> [--skc-goal-mode aggregate|per-story] [--json]",
+			"  $ skc voyage succession status [--json]",
 			"",
 			"FLAGS",
 			"      --target-repo=<value>        Destination repository for the successor run; never the source repository",
@@ -4370,17 +4468,17 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 			"  There is deliberately no `revoke` verb: an unadopted offer keeps its goals fenced.",
 			"",
 			"EXAMPLES",
-			'  $ skc ultragoal succession offer --target-repo ../payments-api --goal-id G002 --goal-id G003 --authorize "leader approved moving the refund stories" --authorized-by human:release-lead --json',
-			"  $ skc ultragoal succession adopt --offer ../plan-repo/.skc/_session-abc/ultragoal/succession/offer-<id>.json --json",
+			'  $ skc voyage succession offer --target-repo ../payments-api --goal-id G002 --goal-id G003 --authorize "leader approved moving the refund stories" --authorized-by human:release-lead --json',
+			"  $ skc voyage succession adopt --offer ../plan-repo/.skc/_session-abc/ultragoal/succession/offer-<id>.json --json",
 			"",
 		].join("\n");
 	}
 
 	return [
-		"Run native SKC Ultragoal workflow commands",
+		"Run native SKC Voyage workflow commands",
 		"",
 		"USAGE",
-		"  $ skc ultragoal <command> [FLAGS]",
+		"  $ skc voyage <command> [FLAGS]",
 		"",
 		"COMMANDS",
 		"  status",
@@ -4401,7 +4499,7 @@ function renderUltragoalHelp(args: readonly string[]): string | null {
 		"  succession adopt",
 		"  succession status",
 		"",
-		"Run `skc ultragoal checkpoint --help`, `skc ultragoal review --help`, `skc ultragoal classify-blocker --help`, `skc ultragoal record-critic-verdict --help`, `skc ultragoal record-critic-gate-override --help`, or `skc ultragoal succession --help` for command-specific requirements.",
+		"Run `skc voyage checkpoint --help`, `skc voyage review --help`, `skc voyage classify-blocker --help`, `skc voyage record-critic-verdict --help`, `skc voyage record-critic-gate-override --help`, or `skc voyage succession --help` for command-specific requirements.",
 		"",
 	].join("\n");
 }
@@ -4474,7 +4572,7 @@ function renderCompleteHandoff(
 		}
 		if (nextAction.kind === "retry-failed" && nextAction.failedGoals) {
 			receipt.failed_goal_ids = nextAction.failedGoals.map(goal => goal.id);
-			receipt.recovery_hints = ["skc ultragoal complete-goals --retry-failed"];
+			receipt.recovery_hints = ["skc voyage complete-goals --retry-failed"];
 		}
 		if (nextAction.kind === "final-aggregate-receipt") {
 			receipt.recovery_hints = [
@@ -4499,7 +4597,7 @@ function renderCompleteHandoff(
 			`ultragoal next-action=execute-goal goal-id=${nextAction.goal.id}`,
 			`objective=${nextAction.goal.objective}`,
 			`skc-objective=${result.plan.skcObjective}`,
-			"checkpoint requires=architectReview:CLEAR+APPROVE,executorQa:passed",
+			"checkpoint requires=review:CLEAR+APPROVE,verify:passed",
 			"",
 		].join("\n");
 	}
@@ -4519,13 +4617,19 @@ function renderCompleteHandoff(
 		return [
 			"ultragoal next-action=retry-failed",
 			`failed-goal-ids=${ids}`,
-			"hint=run `skc ultragoal complete-goals --retry-failed` after the failure is addressed",
+			"hint=run `skc voyage complete-goals --retry-failed` after the failure is addressed",
 			"",
 		].join("\n");
 	}
 	// Fail closed: never claim complete or execute-goal without a goal id.
 	return "ultragoal next-action=resolve-blockers\nhint=no schedulable goal; inspect goals.json and ledger\n";
 }
+function renderLegacyGateWarning(keys: readonly string[] | undefined): string | undefined {
+	return keys?.length
+		? `voyage: legacy quality-gate names accepted (${keys.join(", ")}); write the new names\n`
+		: undefined;
+}
+
 function renderCheckpointContinuation(
 	result: UltragoalCheckpointContinuation,
 	status: UltragoalGoalStatus,
@@ -4545,6 +4649,7 @@ function renderCheckpointContinuation(
 			next_goal_status: result.nextGoal?.status,
 			started_next: result.startedNext,
 			incomplete_goal_ids: result.incompleteGoals.map(goal => goal.id),
+			legacy_keys_normalized: result.legacyKeysNormalized,
 		});
 	const lines = [`Checkpointed ${result.checkpointedGoal.id} as ${status}.`];
 	if (status === "complete") {
@@ -4557,11 +4662,11 @@ function renderCheckpointContinuation(
 			lines.push(
 				result.startedNext
 					? "The next ultragoal goal is active; continue the current aggregate SKC goal and checkpoint this story when verified."
-					: "Run `skc ultragoal complete-goals` to activate the next ultragoal story.",
+					: "Run `skc voyage complete-goals` to activate the next ultragoal story.",
 			);
 		}
 	} else if (status === "failed") {
-		lines.push("Resume failed goals with `skc ultragoal complete-goals --retry-failed` after the blocker is fixed.");
+		lines.push("Resume failed goals with `skc voyage complete-goals --retry-failed` after the blocker is fixed.");
 	} else if (status === "blocked" || status === "review_blocked") {
 		lines.push(
 			"Blocked ultragoal work must be resolved with explicit blocker work or steering before final completion.",
@@ -4730,11 +4835,9 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 				return { status: 0, stdout: renderStatus(await getUltragoalStatus(cwd, sessionId), json) };
 			case "create":
 			case "create-goals": {
-				if (
-					flagValue(args, "--goal-metadata-json") !== undefined &&
-					flagValue(args, "--validation-batch-json") !== undefined
-				) {
-					throw new Error("--validation-batch-json and --goal-metadata-json are mutually exclusive");
+				const batchFlag = readAliasedFlag(args, "--batch-json", [], ["--validation-batch-json"], true);
+				if (flagValue(args, "--goal-metadata-json") !== undefined && batchFlag) {
+					throw new Error(`${batchFlag.flag} and --goal-metadata-json are mutually exclusive`);
 				}
 				const mode = flagValue(args, "--skc-goal-mode") === "per-story" ? "per-story" : "aggregate";
 				const plan = await createUltragoalPlan({
@@ -4742,11 +4845,14 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 					brief: await readBrief(cwd, args),
 					skcGoalMode: mode,
 					goalMetadataJson: flagValue(args, "--goal-metadata-json"),
-					validationBatchJson: flagValue(args, "--validation-batch-json"),
+					validationBatchJson: batchFlag?.value,
 				});
 				return {
 					status: 0,
 					createdPlan: true,
+					stderr: batchFlag?.legacy
+						? renderLegacyGateWarning(["--validation-batch-json->--batch-json"])
+						: undefined,
 					stdout: json
 						? renderCliWriteReceipt({
 								ok: true,
@@ -4781,6 +4887,7 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 				return {
 					status: 0,
 					stdout: renderCheckpointContinuation(result, status, json, cwd),
+					stderr: renderLegacyGateWarning(result.legacyKeysNormalized),
 				};
 			}
 			case "review": {
@@ -4788,6 +4895,9 @@ async function dispatchUltragoalCommand(args: string[], cwd: string): Promise<Ul
 				return {
 					status: 0,
 					stdout: json ? `${JSON.stringify(result, null, 2)}\n` : `${result.verdict}\n`,
+					stderr: Array.isArray(result.legacy_keys_normalized)
+						? renderLegacyGateWarning(result.legacy_keys_normalized)
+						: undefined,
 					reviewBlockerGoalIds: result.blockerGoalIds,
 					createdReviewPlan: (result.blockerGoalIds?.length ?? 0) > 0,
 				};

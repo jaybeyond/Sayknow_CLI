@@ -1,4 +1,8 @@
-import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../skill-state/canonical-skills";
+import {
+	CANONICAL_SKC_WORKFLOW_SKILLS,
+	type CanonicalSkcWorkflowSkill,
+	getSkcWorkflowPublicName,
+} from "../skill-state/canonical-skills";
 
 export type CommandRefVisibility = "public" | "hidden" | "planned";
 export type CommandRefIncludeWhen = "implemented-only" | "planned";
@@ -48,8 +52,16 @@ const skillPath = (skill: CanonicalSkcWorkflowSkill): string =>
 	`packages/coding-agent/src/defaults/skc/skills/${skill}/SKILL.md`;
 
 const stateWrite = (skill: CanonicalSkcWorkflowSkill): CommandRefCommand => ({
-	tokens: ["skc", "state", skill, "write", "--input", `'{"current_phase":"handoff"}'`, "--json"],
-	rendered: `skc state ${skill} write --input '{"current_phase":"handoff"}' --json`,
+	tokens: [
+		"skc",
+		"state",
+		getSkcWorkflowPublicName(skill),
+		"write",
+		"--input",
+		`'{"current_phase":"handoff"}'`,
+		"--json",
+	],
+	rendered: `skc state ${getSkcWorkflowPublicName(skill)} write --input '{"current_phase":"handoff"}' --json`,
 	visibility: "public",
 	includeWhen: "implemented-only",
 	note: "Marks the workflow ready for the skill-tool chain guard.",
@@ -59,8 +71,16 @@ const stateHandoff = (
 	skill: CanonicalSkcWorkflowSkill,
 	targets: readonly CanonicalSkcWorkflowSkill[],
 ): CommandRefCommand => ({
-	tokens: ["skc", "state", skill, "handoff", "--to", `<${targets.join("|")}>`, "--json"],
-	rendered: `skc state ${skill} handoff --to <${targets.join("|")}> --json`,
+	tokens: [
+		"skc",
+		"state",
+		getSkcWorkflowPublicName(skill),
+		"handoff",
+		"--to",
+		`<${targets.map(getSkcWorkflowPublicName).join("|")}>`,
+		"--json",
+	],
+	rendered: `skc state ${getSkcWorkflowPublicName(skill)} handoff --to <${targets.map(getSkcWorkflowPublicName).join("|")}> --json`,
 	visibility: "public",
 	includeWhen: "implemented-only",
 	note: "Bridge command run in-process by the skill tool after slash-skill dispatch.",
@@ -77,11 +97,10 @@ export const WORKFLOW_COMMAND_REF_BLOCKS: readonly CommandRefBlock[] = [
 			end: "<!-- skc:cmdref:end state -->",
 		},
 		commands: [
-			stateWrite("deep-interview"),
 			{
 				tokens: [
 					"skc",
-					"deep-interview",
+					"sonar",
 					"--write",
 					"--stage",
 					"final",
@@ -92,33 +111,27 @@ export const WORKFLOW_COMMAND_REF_BLOCKS: readonly CommandRefBlock[] = [
 					"--deliberate",
 					"--json",
 				],
-				rendered:
-					"skc deep-interview --write --stage final --slug {slug} --spec <markdown-or-path> --deliberate --json",
+				rendered: "skc sonar --write --stage final --slug {slug} --spec <markdown-or-path> --deliberate --json",
 				visibility: "public",
 				includeWhen: "implemented-only",
-				note: "Sanctioned deliberate deep-interview to ralplan bridge.",
+				note: "Persists the final spec and hands off directly to Blueprint.",
 			},
 		],
 		examples: [
 			{
-				label: "handoff state write",
-				bytes: '```\nskc state deep-interview write --input \'{"current_phase":"handoff"}\' --json\n```',
-			},
-			{
-				label: "deliberate bridge",
-				bytes: "```\nskc \\\ndeep-interview --write --stage final --slug {slug} --spec <markdown-or-path> --deliberate --json\n```",
+				label: "check handoff readiness",
+				bytes: "```\nskc sonar read --json\n```",
 			},
 		],
 		aliasesAndBridges: [
 			{
-				from: "deep-interview",
-				to: "ralplan",
-				rendered:
-					"skc deep-interview --write --stage final --slug {slug} --spec <markdown-or-path> --deliberate --json",
+				from: "sonar",
+				to: "blueprint",
+				rendered: "skc sonar --write --stage final --slug {slug} --spec <markdown-or-path> --deliberate --json",
 			},
 		],
 		notes: [
-			"Before invoking `/skill:ralplan`, `/skill:team`, or `/skill:ultragoal`, persist the final spec and mark deep-interview ready for handoff.",
+			"Persist the final spec before chaining to Blueprint, Octo, or Voyage. The final write marks Sonar ready for handoff.",
 		],
 	},
 	{
@@ -127,18 +140,18 @@ export const WORKFLOW_COMMAND_REF_BLOCKS: readonly CommandRefBlock[] = [
 		sourcePath: skillPath("ralplan"),
 		renderOrder: 10,
 		markers: { start: "<!-- skc:cmdref:start state -->", end: "<!-- skc:cmdref:end state -->" },
-		commands: [stateWrite("ralplan"), stateHandoff("ralplan", ["team", "ultragoal"])],
+		commands: [stateHandoff("ralplan", ["team", "ultragoal"])],
 		examples: [
 			{
-				label: "handoff state write",
-				bytes: '```\nskc state ralplan write --input \'{"current_phase":"handoff"}\' --json\n```',
+				label: "check final plan state",
+				bytes: "```\nskc state blueprint read --json\n```",
 			},
 		],
 		aliasesAndBridges: [
-			{ from: "ralplan", to: "team|ultragoal", rendered: "skc state ralplan handoff --to <team|ultragoal> --json" },
+			{ from: "blueprint", to: "octo|voyage", rendered: stateHandoff("ralplan", ["team", "ultragoal"]).rendered },
 		],
 		notes: [
-			"Before invoking `/skill:team` or `/skill:ultragoal`, mark ralplan ready for handoff so the skill tool's chain guard permits the transition.",
+			"After explicit execution approval, a finalized Blueprint can hand off directly to Octo or Voyage. Do not rewrite the final phase first.",
 		],
 	},
 	{
@@ -151,18 +164,18 @@ export const WORKFLOW_COMMAND_REF_BLOCKS: readonly CommandRefBlock[] = [
 		examples: [
 			{
 				label: "handoff state write",
-				bytes: '```\nskc state ultragoal write --input \'{"current_phase":"handoff"}\' --json\n```',
+				bytes: `\`\`\`\n${stateWrite("ultragoal").rendered}\n\`\`\``,
 			},
 		],
 		aliasesAndBridges: [
 			{
-				from: "ultragoal",
-				to: "ralplan|deep-interview",
-				rendered: "skc state ultragoal handoff --to <ralplan|deep-interview> --json",
+				from: "voyage",
+				to: "blueprint|sonar",
+				rendered: stateHandoff("ultragoal", ["ralplan", "deep-interview"]).rendered,
 			},
 		],
 		notes: [
-			"When the aggregate ultragoal is complete OR the user requests return to planning/clarification, mark ultragoal ready for handoff.",
+			"When the aggregate Voyage run is complete or the user requests planning or clarification, mark Voyage ready for handoff.",
 		],
 	},
 	{
@@ -175,18 +188,18 @@ export const WORKFLOW_COMMAND_REF_BLOCKS: readonly CommandRefBlock[] = [
 		examples: [
 			{
 				label: "handoff state write",
-				bytes: '```\nskc state team write --input \'{"current_phase":"handoff"}\' --json\n```',
+				bytes: `\`\`\`\n${stateWrite("team").rendered}\n\`\`\``,
 			},
 		],
 		aliasesAndBridges: [
 			{
-				from: "team",
-				to: "ralplan|deep-interview|ultragoal",
-				rendered: "skc state team handoff --to <ralplan|deep-interview|ultragoal> --json",
+				from: "octo",
+				to: "blueprint|sonar|voyage",
+				rendered: stateHandoff("team", ["ralplan", "deep-interview", "ultragoal"]).rendered,
 			},
 		],
 		notes: [
-			"When the team task-set completes OR the user requests return to planning/persistence, mark team ready for handoff.",
+			"When the Octo task set completes or the user requests planning or persistence, mark Octo ready for handoff.",
 		],
 	},
 ] as const;

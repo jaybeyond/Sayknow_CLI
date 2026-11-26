@@ -11,9 +11,9 @@ import { trustedCoordinatorEnv } from "../skc-runtime/sidecar-bootstrap-env";
 import { runNativeUltragoalCommand } from "../skc-runtime/ultragoal-runtime";
 
 export default class Ultragoal extends Command {
-	static description = "Run native SKC Ultragoal workflow commands";
+	static description = "Run Voyage, SKC's durable goal workflow";
 	static strict = false;
-	static examples = ["$ skc ultragoal status --json"];
+	static examples = ["$ skc voyage status --json"];
 	static delegateHelp = true;
 
 	async run(): Promise<void> {

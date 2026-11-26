@@ -159,13 +159,13 @@ cd ../my-task-worktree && skc --tmux
 Inside a SKC session, use the public workflow surface:
 
 ```text
-/skill:deep-interview clarify ambiguous requirements
-/skill:ralplan build and critique the implementation plan
-skc ultragoal create-goals --brief-file <approved-plan>
-skc ultragoal complete-goals
+/skill:sonar clarify ambiguous requirements
+/skill:blueprint build and critique the implementation plan
+skc voyage create-goals --brief-file <approved-plan>
+skc voyage complete-goals
 ```
 
-Add `skc team ...` only when coordinated tmux workers materially help.
+Add `skc octo ...` only when coordinated tmux workers materially help. The previous command names remain accepted for existing scripts and sessions.
 
 ## Core capabilities
 

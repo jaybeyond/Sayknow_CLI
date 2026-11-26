@@ -40,7 +40,7 @@ interface RouteMatch {
 const PROMPT_PREVIEW_LIMIT = 240;
 
 const DURABLE_TRACKING_PATTERNS = [
-	/^\s*\/skill:ultragoal\b/i,
+	/^\s*\/skill:(?:ultragoal|voyage)(?:\s|$)/i,
 	/\b(?:use|run|start|create|activate|invoke|execute)\s+(?:the\s+)?ultragoal\b/i,
 	/\bultragoal(?:로|으로)[^.!?\n]{0,40}(?:해|진행|실행|관리|처리)/i,
 	/\bultragoal(?:을|를)\s+(?:(?:사용|실행|시작|활성화|호출|진행|관리|처리)(?:해줘|해주세요|하세요)|(?:써|쓰)(?:줘|주세요|세요)|해줘|해주세요|하세요)/i,
@@ -149,7 +149,7 @@ function classifyRoute(text: string): RouteMatch {
 		return {
 			route: "deep-interview",
 			reason: "ambiguous requirements need clarification",
-			recommendedInvocation: "/skill:deep-interview",
+			recommendedInvocation: "/skill:sonar",
 			triggers: ["ambiguous requirements"],
 		};
 	}
@@ -158,7 +158,7 @@ function classifyRoute(text: string): RouteMatch {
 		return {
 			route: "ultragoal",
 			reason: "durable tracking requested",
-			recommendedInvocation: "/skill:ultragoal",
+			recommendedInvocation: "/skill:voyage",
 			triggers: ["durable tracking"],
 		};
 	}
@@ -167,7 +167,7 @@ function classifyRoute(text: string): RouteMatch {
 		return {
 			route: "ralplan",
 			reason: "architecture or sequence risk requires deliberate planning",
-			recommendedInvocation: "/skill:ralplan --deliberate",
+			recommendedInvocation: "/skill:blueprint --deliberate",
 			triggers: ["architecture/sequence risk"],
 		};
 	}
@@ -176,7 +176,7 @@ function classifyRoute(text: string): RouteMatch {
 		return {
 			route: "team",
 			reason: "coordinated persistent workers requested",
-			recommendedInvocation: "/skill:team",
+			recommendedInvocation: "/skill:octo",
 			triggers: ["coordinated workers"],
 		};
 	}

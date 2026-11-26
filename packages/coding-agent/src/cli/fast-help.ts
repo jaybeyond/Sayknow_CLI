@@ -9,10 +9,10 @@ export function getExtraHelpText(): string {
   ${APP_NAME} state                - Inspect or manage persisted SKC state
   ${APP_NAME} harness              - Run harness control-plane commands
   ${APP_NAME} coordinator          - Manage coordinator/runtime coordination helpers
-  ${APP_NAME} team                 - Run tmux-backed coordinated execution
-  ${APP_NAME} ultragoal            - Run durable goal execution workflow
-  ${APP_NAME} ralplan              - Run consensus planning workflow
-  ${APP_NAME} deep-interview       - Run requirements interview workflow
+  ${APP_NAME} octo                 - Run tmux-backed coordinated execution
+  ${APP_NAME} voyage               - Run durable goal execution workflow
+  ${APP_NAME} blueprint            - Run consensus planning workflow
+  ${APP_NAME} sonar                - Run requirements interview workflow
   ${APP_NAME} skills               - List/read embedded workflow skills
   ${APP_NAME} config               - List, get, and set configuration values
   ${APP_NAME} stats                - View AI usage statistics (tokens, cost, requests)

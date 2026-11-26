@@ -7,10 +7,12 @@ import type { SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
 import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
 import type { SkillPromptDetails } from "../session/messages";
+import { getSkcWorkflowPublicName, resolveSkcWorkflowId } from "../skill-state/canonical-skills";
 import { expandTilde } from "../tools/path-utils";
 import type { LoadedSubskillActivation } from "./skc-plugins";
 import { buildSubskillInjection } from "./skc-plugins/injection";
 import { renderSkillAdvertisement } from "./skc-plugins/runtime-adapters";
+import { createSkillNameFilter } from "./skill-name-filter";
 export interface Skill {
 	name: string;
 	description: string;
@@ -137,17 +139,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const realPathSet = new Set<string>();
 	const collisionWarnings: SkillWarning[] = [];
 
-	// Check if skill name matches any of the include patterns
-	function matchesIncludePatterns(name: string): boolean {
-		if (includeSkills.length === 0) return true;
-		return includeSkills.some(pattern => new Bun.Glob(pattern).match(name));
-	}
-
-	// Check if skill name matches any of the ignore patterns
-	function matchesIgnorePatterns(name: string): boolean {
-		if (ignoredSkills.length === 0) return false;
-		return ignoredSkills.some(pattern => new Bun.Glob(pattern).match(name));
-	}
+	const allowsSkillName = createSkillNameFilter(includeSkills, ignoredSkills);
 
 	const disabledSkillNames = new Set(
 		(disabledExtensions ?? []).filter(id => id.startsWith("skill:")).map(id => id.slice(6)),
@@ -156,9 +148,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const filteredSkills = result.items.filter(capSkill => {
 		if (disabledSkillNames.has(capSkill.name)) return false;
 		if (!isSourceEnabled(capSkill._source)) return false;
-		if (matchesIgnorePatterns(capSkill.name)) return false;
-		if (!matchesIncludePatterns(capSkill.name)) return false;
-		return true;
+		return allowsSkillName(capSkill.name);
 	});
 
 	// Batch resolve all real paths in parallel
@@ -222,8 +212,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	for (const { expandedDir, scanResult } of customDirectoryResults) {
 		for (const capSkill of scanResult.items) {
 			if (disabledSkillNames.has(capSkill.name)) continue;
-			if (matchesIgnorePatterns(capSkill.name)) continue;
-			if (!matchesIncludePatterns(capSkill.name)) continue;
+			if (!allowsSkillName(capSkill.name)) continue;
 			allCustomSkills.push({
 				skill: {
 					name: capSkill.name,
@@ -292,7 +281,7 @@ export interface BuildSkillPromptMessageContext {
 }
 
 export function getSkillSlashCommandName(skill: Pick<Skill, "name">): string {
-	return `skill:${skill.name}`;
+	return `skill:${getSkcWorkflowPublicName(skill.name)}`;
 }
 
 export function isNamespacedSkillSlashCommandName(commandName: string): boolean {
@@ -304,7 +293,12 @@ export function getSkillSlashCommandNames(skill: Pick<Skill, "name">): string[] 
 }
 
 export function isSkillSlashCommandName(commandName: string, skill: Pick<Skill, "name">): boolean {
-	return commandName === getSkillSlashCommandName(skill);
+	const id = resolveSkcWorkflowId(skill.name);
+	return id
+		? skill.name === id &&
+				resolveSkcWorkflowId(commandName.slice(6)) === id &&
+				isNamespacedSkillSlashCommandName(commandName)
+		: commandName === getSkillSlashCommandName(skill);
 }
 
 export interface ResolvedSkillSlashCommand {
@@ -353,7 +347,11 @@ export function parseSkillInvocations(
 	for (const match of trimmedText.matchAll(canonicalSkillCommandPattern)) {
 		const commandName = match[2];
 		if (!commandName) continue;
-		const skill = skillsByCommandName.get(commandName);
+		const id = resolveSkcWorkflowId(commandName.slice(6));
+		const skill = id
+			? (skillsByCommandName.get(`skill:${getSkcWorkflowPublicName(id)}`) ?? skillsByCommandName.get(`skill:${id}`))
+			: skillsByCommandName.get(commandName);
+		if (id && skill?.name !== id) continue;
 		if (!skill) continue;
 		const leading = match[1] ?? "";
 		const index = (match.index ?? 0) + leading.length;
@@ -395,6 +393,8 @@ export function resolveSkillSlashCommands(
 	const claimedNames = new Set<string>();
 	for (const skill of skills) {
 		if (skill.hide === true) continue;
+		const id = resolveSkcWorkflowId(skill.name);
+		if (id && id !== skill.name) continue;
 		for (const name of getSkillSlashCommandNames(skill)) {
 			if (claimedNames.has(name)) {
 				continue;

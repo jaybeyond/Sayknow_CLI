@@ -1,20 +1,20 @@
 ---
 name: team
-description: Multi-worker SKC tmux team orchestration
+description: Octo coordinated multi-worker execution in tmux
 
 source: "forked from upstream team skill and rebranded for SKC"
 ---
 
-# Team Skill
+# Octo: Coordinated Execution
 
 ## Purpose & Principles
 
-`$team` is the tmux-based multi-worker execution mode for SKC. It starts real SKC worker CLI sessions by splitting the current tmux leader window and coordinates them through `.skc/_session-{sessionid}/state/team/...` files plus CLI team interop (`skc team api ...`) and state files.
+Octo is the tmux-based multi-worker execution mode for SKC. It starts real SKC worker CLI sessions by splitting the current tmux leader window and coordinates them through `.skc/_session-{sessionid}/state/team/...` files and the `skc octo api` interface.
 
-This skill is operationally sensitive. Treat it as an operator workflow, not a generic prompt pattern. In SKC App or plain outside-tmux sessions, do not present `$team` / `skc team` as directly available; launch SKC CLI from shell first, or stay on the nearest app-safe surface until the user explicitly wants the tmux runtime.
+This skill is operationally sensitive. Treat it as an operator workflow, not a generic prompt pattern. In SKC App or plain outside-tmux sessions, do not present `skc octo` as directly available; launch SKC CLI from shell first, or stay on the nearest app-safe surface until the user explicitly wants the tmux runtime.
 
 - Use **SKC native subagents** for bounded, in-session parallelism where one leader thread can fan out a few independent subtasks and wait for them directly.
-- Use **`skc team`** when you need durable visible tmux workers, shared task state, worker mailbox files, worktrees, explicit lifecycle control, or long-running execution that must survive beyond one local reasoning burst.
+- Use **`skc octo`** when you need durable visible tmux workers, shared task state, worker mailbox files, worktrees, explicit lifecycle control, or long-running execution that must survive beyond one local reasoning burst.
 - Native subagents can complement team execution, but they do **not** replace the tmux team runtime's stateful coordination contract.
 
 Use the shared workflow guidance pattern: outcome-first framing, concise visible updates for multi-step work, local overrides for the active workflow branch, validation proportional to risk, explicit stop rules, and automatic continuation for safe reversible steps. Ask only for material, destructive, credentialed, external-production, or preference-dependent branches.
@@ -25,62 +25,62 @@ When team detects its own current-session state is corrupt, tampered, unreadable
 
 ## What This Skill Must Do
 
-When user triggers `$team`, the agent must:
+When the user invokes Octo, the agent must:
 
-1. Invoke SKC runtime directly with `skc team ...`
+1. Invoke SKC runtime directly with `skc octo ...`
 2. Avoid replacing the flow with in-process `spawn_agent` fanout
 3. Verify startup and surface concrete state/pane evidence
 4. If active team mode state is missing, initialize/sync it from canonical team runtime state before proceeding
 5. Keep team state alive until the worker is terminal (unless explicit abort)
 6. Handle cleanup and stale-pane recovery when needed
 
-If `skc team` is unavailable, stop with a hard error.
+If `skc octo` is unavailable, stop with a hard error.
 
 ## Invocation Contract
 
 ```bash
-skc team [N:agent-type] "<task description>"
+skc octo [N:agent-type] "<task description>"
 ```
 
 Examples:
 
 ```bash
-skc team 3:executor "analyze feature X and report flaws"
-skc team "debug flaky integration tests"
-skc team "ship end-to-end fix with verification"
+skc octo 3:executor "analyze feature X and report flaws"
+skc octo "debug flaky integration tests"
+skc octo "ship end-to-end fix with verification"
 ```
 
 ### Team-first launch contract
 
-`skc team ...` is now the canonical launch path for coordinated execution.
+`skc octo ...` is the canonical launch path for coordinated execution. The legacy `skc team ...` spelling is still accepted.
 Team mode should carry visible worker delivery/verification lanes without
 requiring a separate linked execution loop up front. SKC team supports current-window multi-worker mode; explicit `N:agent-type` values select worker count and shared role.
 
-- **Canonical launch:** use plain `skc team ...` / `$team ...` for the coordinated worker.
+- **Canonical launch:** use plain `skc octo ...` for the coordinated worker.
 - **Verification ownership:** keep one lane focused on tests, regression coverage, and evidence before shutdown.
 - **Typed lanes:** model delivery, verification, architecture, or specialist work as task `lane` metadata plus `required_role` / `allowed_roles`; claiming enforces owner, role, dependency, and lease order.
 - **Escalation:** use a new explicit follow-up task only when later manual work still needs a persistent single-owner fix/verification loop.
-- **Deprecation:** nested team execution commands have been removed. Use plain `skc team ...` for coordinated execution.
+- **Deprecation:** nested team execution commands have been removed. Use plain `skc octo ...` for coordinated execution.
 
 ### Team + Ultragoal bridge
 
 Use `$ultragoal` for durable leader-owned goal/ledger tracking and `$team` for parallel visible tmux execution lanes. When Team is launched with an active `.skc/_session-{sessionid}/ultragoal/goals.json`, worker task/status context may include leader-owned Ultragoal context: `.skc/_session-{sessionid}/ultragoal/goals.json`, `.skc/_session-{sessionid}/ultragoal/ledger.jsonl`, the active goal id, SKC goal mode, and the `fresh_leader_goal_get_required` checkpoint policy.
 
-Workers provide task status and verification evidence only. They do not own Ultragoal goal state, create worker ledgers, mutate `.skc/_session-{sessionid}/ultragoal`, auto-launch Team from Ultragoal, or perform hidden SKC goal mutation. Workers must not run `skc ultragoal checkpoint`; checkpoint authority stays with the leader after worker tasks are terminal. Ultragoal does not auto-launch Team and performs no hidden goal mutation. The leader uses terminal Team evidence plus the current-session active SKC goal snapshot and strict quality gate to run `skc ultragoal checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/_session-{sessionid}/ultragoal and <id>>" --quality-gate-json <quality-gate-json-or-path>`.
+Workers provide task status and verification evidence only. They do not own Ultragoal goal state, create worker ledgers, mutate `.skc/_session-{sessionid}/ultragoal`, auto-launch Team from Ultragoal, or perform hidden SKC goal mutation. Workers must not run `skc voyage checkpoint`; checkpoint authority stays with the leader after worker tasks are terminal. Ultragoal does not auto-launch Team and performs no hidden goal mutation. The leader uses terminal Team evidence plus the current-session active SKC goal snapshot and strict quality gate to run `skc voyage checkpoint --goal-id <id> --status complete --evidence "<team evidence mentioning .skc/_session-{sessionid}/ultragoal and <id>>" --quality-gate-json <quality-gate-json-or-path>`.
 
 ### Worker command override
 
-Important: `N:agent-type` (for example `3:executor`) selects the worker count and role prompt. Plain `skc team "task"` defaults to 3 executor workers; `skc team 1:executor "task"` is the explicit single-worker form.
+Important: `N:agent-type` (for example `3:executor`) selects the worker count and role prompt. Plain `skc octo "task"` defaults to 3 executor workers; `skc octo 1:executor "task"` is the explicit single-worker form.
 
 To launch the worker with a specific SKC-compatible command, use `SKC_TEAM_WORKER_COMMAND`:
 
 ```bash
-SKC_TEAM_WORKER_COMMAND="bun packages/coding-agent/src/cli.ts" skc team executor "update docs and report"
+SKC_TEAM_WORKER_COMMAND="bun packages/coding-agent/src/cli.ts" skc octo executor "update docs and report"
 ```
 
 ## Preconditions
 
-Before running `$team`, confirm:
+Before running Octo, confirm:
 
 1. `tmux` installed (`tmux -V`)
 2. Current leader session is inside tmux (`$TMUX` is set)
@@ -94,11 +94,11 @@ Suggested preflight:
 tmux list-panes -F '#{pane_id}\t#{pane_start_command}' | rg 'hud --watch' || true
 ```
 
-If duplicates exist, remove extras before `skc team` to prevent HUD ending up in worker stack.
+If duplicates exist, remove extras before `skc octo` to prevent HUD ending up in worker stack.
 
 ## Pre-context Intake Gate
 
-Before launching `skc team`, require a grounded context snapshot:
+Before launching `skc octo`, require a grounded context snapshot:
 
 1. Derive a task slug from the request.
 2. Reuse the latest relevant snapshot in `.skc/context/{slug}-*.md` when available.
@@ -124,9 +124,9 @@ When `$team` is used as a follow-up mode from ralplan, carry forward the approve
 - state that SKC team launches the requested worker count and role allocation
 - state the suggested reasoning level for each lane when available
 - explain why each lane exists (delivery, verification, specialist support)
-- include an explicit launch hint (`skc team "<task>"` / `$team "<task>"`) for the coordinated worker run; mention `$ultragoal` as the default durable follow-up/ledger path; mention a later separate Single-owner execution follow-up only when explicitly requested or genuinely needed as a fallback
+- Include `skc octo "<task>"` as the launch hint and Voyage as the default durable follow-up. Mention single-owner execution only when requested or needed as a fallback.
 - if the ideal role is unavailable, choose the closest role from the roster and say so
-- For multi-worker follow-up execution, do not pass an inline "Split lanes: A..., B..." sentence as the whole team task. `skc team` rejects ambiguous inline lane splits because they previously caused every worker to receive the same broad task. Use explicit markdown lane sections instead:
+- For multi-worker follow-up execution, do not pass an inline "Split lanes: A..., B..." sentence as the whole task. `skc octo` rejects ambiguous inline lane splits because they previously caused every worker to receive the same broad task. Use explicit markdown lane sections instead:
   ```md
   ### Lane A — Delivery
   Implement delivery-only changes and evidence.
@@ -138,7 +138,7 @@ When `$team` is used as a follow-up mode from ralplan, carry forward the approve
 
 ## Current Runtime Behavior (As Implemented)
 
-`skc team` currently performs:
+`skc octo` currently performs:
 
 1. Parse args (`N`, `agent-type`, task), default to 3 workers, and cap workers at 20.
 2. Non-dry-run: detect the current tmux leader context with `display-message -p "#S:#I #{pane_id}"` before creating state or worktrees.
@@ -164,14 +164,14 @@ When `$team` is used as a follow-up mode from ralplan, carry forward the approve
    - idle/done/failed worker worktrees are cross-rebased onto the updated leader after integration; working workers are skipped
    - conflicts are aborted, recorded, and reported to the leader mailbox without falsely advancing `last_integrated_head`
 8. Store pane/target/integration/lifecycle evidence in config/manifest/snapshot: `tmux_session`, `tmux_session_name`, `tmux_target`, leader pane id, worker pane ids, `worker_lifecycle_by_id`, and `integration_by_worker`.
-9. Return control to the leader; follow-up uses `status`, `resume`, `shutdown`, and `skc team api`.
+9. Return control to the leader; follow-up uses `status`, `resume`, `shutdown`, and `skc octo api`.
 
 Important:
 
 - Leader remains in the existing left pane.
 - Worker panes are independent full SKC worker CLI sessions on the right side of a leader-left/worker-right split.
 - Worker CLI selection is teammate-only: `SKC_TEAM_WORKER_CLI` and `SKC_TEAM_WORKER_CLI_MAP` accept only `auto` or `skc`; legacy/provider values such as `codex`, `claude`, or `gemini` are rejected before launch.
-- The worker may run in a dedicated git worktree (`skc team --worktree[=<name>]`) while sharing the team state root.
+- The worker may run in a dedicated git worktree (`skc octo --worktree[=<name>]`) while sharing the team state root.
 - `shutdown` kills only the recorded worker pane after confirming it still belongs to the stored tmux target and is not the leader pane. It never kills the tmux session.
 
 ## Required Lifecycle (Operator Contract)
@@ -179,13 +179,13 @@ Important:
 Follow this exact lifecycle when running `$team`:
 
 1. Start team and verify startup evidence (team line, tmux target, worker pane id, state dir, `worker_lifecycle_by_id.<worker>.lifecycle_state=ready` after startup ACK).
-2. Monitor task progress with runtime/state tools first (`skc team status <team>`, `skc team resume <team>`, task files).
+2. Monitor task progress with runtime/state tools first (`skc octo status <team>`, `skc octo resume <team>`, task files).
 3. Wait for terminal task state and integration settlement before shutdown:
    - `pending=0`
    - `in_progress=0`
    - `failed=0` (or explicitly acknowledged failure path)
    - no pending integration request/conflict (`status` / `resume` must not report `phase=awaiting_integration`)
-4. Only then run `skc team shutdown <team>`.
+4. Only then run `skc octo shutdown <team>`.
 5. Verify shutdown evidence and preserved state (`phase=complete`, worker runtime status `stopped`, lifecycle `stopped` with a matching graceful shutdown request id). If shutdown is forced before evidence-backed task completion, expect `phase=cancelled` or `phase=failed`; if tasks are complete but integration is still pending or conflicted, expect `phase=awaiting_integration`, not `complete`.
 
 Do not run `shutdown` while the worker is actively writing updates unless user explicitly requested abort/cancel. Do not treat ad-hoc pane typing as primary control flow when runtime/state evidence is available.
@@ -197,7 +197,7 @@ While a team is running, keep checking live team state until terminal completion
 Minimum acceptable loop:
 
 ```bash
-sleep 30 && skc team monitor <team-name>
+sleep 30 && skc octo monitor <team-name>
 ```
 The mutating monitor path also performs bounded liveness recovery: expired task claims, stale heartbeat claims, and missing recorded worker panes are requeued instead of leaving work permanently `in_progress`.
 
@@ -213,17 +213,17 @@ The mutating monitor path also performs bounded liveness recovery: expired task 
 
 The policy has at most two attempts per immutable incident: attempt 1 reserves a 30-second hold, then attempt 2 reserves a 120-second hold only after attempt 1 was recorded as sent and its hold elapsed. A retry still requires the heartbeat to be stale and every fence above to pass. Reservations and outcomes are create-without-clobber journal records keyed to the incident identity; a pre-existing reservation, an unknown/missing/non-sent outcome after restart, or a second-attempt record fails closed rather than sending again.
 
-Each eligible attempt sends only the fixed continuation prompt to that verified recorded worker pane, followed by Enter. It does not replay provider output or a prior prompt, inspect or inject dynamic pane content, cross pane boundaries, kill or relaunch workers, create/split panes, or extend/rewrite claims. This bounded nudge is not automatic recovery for a dead, shutdown, reassigned, terminal, or lease-expired worker. When it cannot act, use `skc team status <team-name>` / `skc team monitor <team-name>` and the documented state evidence; manual pane intervention remains the last-resort fallback.
+Each eligible attempt sends only the fixed continuation prompt to that verified recorded worker pane, followed by Enter. It does not replay provider output or a prior prompt, inspect or inject dynamic pane content, cross pane boundaries, kill or relaunch workers, create/split panes, or extend/rewrite claims. This bounded nudge is not automatic recovery for a dead, shutdown, reassigned, terminal, or lease-expired worker. When it cannot act, use `skc octo status <team-name>` / `skc octo monitor <team-name>` and the documented state evidence; manual pane intervention remains the last-resort fallback.
 
 Continuation input is unsupported on psmux and native Windows send-keys fallback transports: the fixed prompt is not dispatched there because equivalent literal-input semantics are not proven. Startup's existing empty-pane worker command fallback is separate and unchanged.
 
 ## Operational Commands
 
 ```bash
-skc team status <team-name>
-skc team monitor <team-name>
-skc team resume <team-name>
-skc team shutdown <team-name>
+skc octo status <team-name>
+skc octo monitor <team-name>
+skc octo resume <team-name>
+skc octo shutdown <team-name>
 ```
 
 Semantics:
@@ -241,8 +241,8 @@ Semantics:
 ### Control Plane
 
 - Current tmux leader window and one or more worker panes.
-- `skc team` lifecycle commands.
-- `skc team api claim-task` and `skc team api transition-task-status`.
+- `skc octo` lifecycle commands.
+- `skc octo api claim-task` and `skc octo api transition-task-status`.
 
 ### Data Plane
 
@@ -269,16 +269,16 @@ Semantics:
 
 ## Team Mutation Interop (CLI-first)
 
-Use `skc team api` for machine-readable task lifecycle operations.
+Use `skc octo api` for machine-readable task lifecycle operations.
 
 ```bash
-skc team api worker-startup-ack --input '{"team_name":"my-team","worker_id":"worker-1","protocol_version":"1"}' --json
-skc team api claim-task --input '{"team_name":"my-team","worker_id":"worker-1"}' --json
-skc team api transition-task-status --input '{"team_name":"my-team","task_id":"task-1","to":"completed","worker_id":"worker-1","claim_token":"<claim-token>","completion_evidence":{"summary":"Completed requested work and verified it locally.","items":[{"kind":"command","status":"passed","summary":"Focused test passed","command":"bun test packages/coding-agent/test/skc-runtime/team-runtime.test.ts"}],"files":["packages/coding-agent/test/skc-runtime/team-runtime.test.ts"],"notes":"Include at least one passed command or verified inspection/artifact item."}}' --json
-skc team api update-worker-status --input '{"team_name":"my-team","worker_id":"worker-1","status":"working","current_task_id":"task-1"}' --json
-skc team api recover-stale-claims --input '{"team_name":"my-team"}' --json
-skc team api read-traces --input '{"team_name":"my-team"}' --json
-skc team api create-task --input '{"team_name":"my-team","subject":"Verify delivery","description":"Run verification","owner":"worker-1","lane":"verification","required_role":"executor","depends_on":["task-1"]}' --json
+skc octo api worker-startup-ack --input '{"team_name":"my-team","worker_id":"worker-1","protocol_version":"1"}' --json
+skc octo api claim-task --input '{"team_name":"my-team","worker_id":"worker-1"}' --json
+skc octo api transition-task-status --input '{"team_name":"my-team","task_id":"task-1","to":"completed","worker_id":"worker-1","claim_token":"<claim-token>","completion_evidence":{"summary":"Completed requested work and verified it locally.","items":[{"kind":"command","status":"passed","summary":"Focused test passed","command":"bun test packages/coding-agent/test/skc-runtime/team-runtime.test.ts"}],"files":["packages/coding-agent/test/skc-runtime/team-runtime.test.ts"],"notes":"Include at least one passed command or verified inspection/artifact item."}}' --json
+skc octo api update-worker-status --input '{"team_name":"my-team","worker_id":"worker-1","status":"working","current_task_id":"task-1"}' --json
+skc octo api recover-stale-claims --input '{"team_name":"my-team"}' --json
+skc octo api read-traces --input '{"team_name":"my-team"}' --json
+skc octo api create-task --input '{"team_name":"my-team","subject":"Verify delivery","description":"Run verification","owner":"worker-1","lane":"verification","required_role":"executor","depends_on":["task-1"]}' --json
 ```
 
 Canonical worker lifecycle operations:
@@ -293,7 +293,7 @@ Claim eligibility is ordered and must not be bypassed: explicit task id selectio
 
 Completion evidence is stored inline on the task record as `completion_evidence`. It must include a non-empty `summary`, an `items` array, and at least one item with `status: "passed"` or `status: "verified"`. Valid item kinds are `command`, `inspection`, and `artifact`; command items require `command`. The camel-case alias `completionEvidence` is accepted by the API input, but legacy string `evidence` and separate evidence files are not part of the public completion contract.
 
-SKC-team interop operations are also available for mailbox, native notification, worker heartbeat/status, stale-claim recovery, startup ACK, events, monitor snapshots, approvals, and shutdown request/ack flows; run `skc team api --help` for the full operation list.
+Mailbox, notification, heartbeat, stale-claim recovery, startup ACK, events, monitor snapshots, approvals, and shutdown request/ack operations are also available. Run `skc octo api --help` for the full list.
 
 Structured trace records in `trace.jsonl` are append-only schema version 1 entries. Each trace references the legacy `events.jsonl` source via `source_event_id`, keeps `event_type`, worker/task ids, and includes `evidence_refs` for completion evidence or claim recovery when available. Trace append failures are isolated in `trace-errors.jsonl` and do not break `events.jsonl` compatibility.
 
@@ -304,7 +304,7 @@ SKC ports team-mode concepts from `../../oh-my-codex`, not code or OMX/Codex-spe
 | Concept | SKC-native equivalent |
 |---------|-----------------------|
 | Worker identity/inbox/mailbox paths | `.skc/_session-{sessionid}/state/team/<team>/workers/<worker>/identity.json`, `inbox.md`, and per-message mailbox records under `.skc/_session-{sessionid}/state/team/<team>/mailbox/<worker>/`. |
-| Startup ACK | `skc team api worker-startup-ack`, persisted as `workers/<worker>/startup-ack.json`. |
+| Startup ACK | `skc octo api worker-startup-ack`, persisted as `workers/<worker>/startup-ack.json`. |
 | Claim-safe lifecycle APIs | `claim-task`, `transition-task-status`, and `release-task-claim` with worker ownership and claim-token guards. |
 | Delivery states and deferred pane attempts | Native notification records under `.skc/_session-{sessionid}/state/team/<team>/notifications/` with `pending`, `sent`, `queued`, `deferred`, `failed`, `delivered`, and `acknowledged` states. |
 | Opt-in memory-guard relaunch | Lifecycle nudges remain non-destructive by default. On Linux only, a worker whose durable `memory-guard.json` explicitly enables automatic action may be checkpointed and relaunched after sustained pressure, bounded retries, current claim validation, and a continuation-safe handoff; unsupported platforms and missing authority remain advisory-only. |
@@ -343,29 +343,29 @@ Operator note (important for SKC panes):
 
 ### Common failures
 
-- **Outside tmux:** non-dry-run launch fails before team state or worktrees are created. Start `skc team` from an attached tmux leader pane.
+- **Outside tmux:** non-dry-run launch fails before team state or worktrees are created. Start `skc octo` from an attached tmux leader pane.
 - **Split failure:** startup records a failed phase if state was already initialized, rolls back created worktrees, and never kills the leader tmux session.
 - **Worker API ENOENT:** team state is missing or `SKC_TEAM_STATE_ROOT` points somewhere else. Check `.skc/_session-{sessionid}/state/team/<team>/` before assuming worker failure.
 - **Stale pane on shutdown:** shutdown only kills a recorded worker pane when it still belongs to the stored `tmux_target` and is not the leader pane. Stale panes outside that target require manual inspection.
-- **Integration conflict:** `skc team monitor <team>` / `resume` aborts the failing merge, cherry-pick, or worker rebase; `skc team status <team>` is read-only inspection. Inspect `.skc/_session-{sessionid}/state/team/<team>/integration-report.md`, `.skc/_session-{sessionid}/state/team/<team>/events.jsonl`, `.skc/_session-{sessionid}/state/team/<team>/mailbox/leader-fixed.json`, and `.skc/_session-{sessionid}/reports/team-commit-hygiene/<team>.ledger.json`.
+- **Integration conflict:** `skc octo monitor <team>` / `resume` aborts the failing merge, cherry-pick, or worker rebase; `skc octo status <team>` is read-only inspection. Inspect `.skc/_session-{sessionid}/state/team/<team>/integration-report.md`, `.skc/_session-{sessionid}/state/team/<team>/events.jsonl`, `.skc/_session-{sessionid}/state/team/<team>/mailbox/leader-fixed.json`, and `.skc/_session-{sessionid}/reports/team-commit-hygiene/<team>.ledger.json`.
 
 ### Safe Manual Intervention (last resort)
 
-Use only after checking `skc team status <team>` and state evidence:
+Use only after checking `skc octo status <team>` and state evidence:
 
 1. Inspect team files:
    - `.skc/_session-{sessionid}/state/team/<team>/config.json`
    - `.skc/_session-{sessionid}/state/team/<team>/tasks/task-1.json`
    - `.skc/_session-{sessionid}/state/team/<team>/mailbox/worker-1.json`
 2. Use supported team surfaces before manual pane intervention:
-   - `skc team status <team>` for current recorded state
-   - `skc team monitor <team>` when a live monitor/update loop is needed
-   - `skc team api <team>` only for documented programmatic operations
+   - `skc octo status <team>` for current recorded state
+   - `skc octo monitor <team>` when a live monitor/update loop is needed
+   - `skc octo api <operation>` only for documented programmatic operations
 3. If the recorded worker pane is stuck in an interactive state, safely return to idle prompt first:
-   - optional interrupt `C-c` or escape flow (CLI-specific) once, then re-check `skc team status <team>` and relevant state files
+   - optional interrupt `C-c` or escape flow (CLI-specific) once, then re-check `skc octo status <team>` and relevant state files
 4. Send one concise trigger only when runtime/state checks show manual prompt input is needed:
    - `tmux send-keys -t %<worker-pane> "continue current task; report status" C-m`
-5. Re-check task state, worker mailbox, and `skc team status <team>`.
+5. Re-check task state, worker mailbox, and `skc octo status <team>`.
 
 ### Shutdown reports success but stale worker panes remain
 
@@ -388,18 +388,18 @@ tmux kill-pane -t %450
 tmux kill-pane -t %451
 
 # 3) Shut down recorded team state/workers through the supported team runtime
-# Replace <team-name> with the team from `skc team list` / `skc team status`.
-skc team shutdown <team-name>
+# Replace <team-name> with the team from `skc octo list` / `skc octo status`.
+skc octo shutdown <team-name>
 
 # 4) Retry
-skc team executor "fresh retry"
+skc octo executor "fresh retry"
 ```
 
 Guidelines:
 
 - Do not kill the leader pane.
 - Do not kill HUD panes unless intentionally restarting HUD.
-- Prefer `skc team shutdown <team>` for recorded active workers; use manual pane cleanup only for verified stale panes.
+- Prefer `skc octo shutdown <team>` for recorded active workers; use manual pane cleanup only for verified stale panes.
 
 ## Required Reporting During Execution
 
@@ -407,36 +407,36 @@ When operating this skill, provide concrete progress evidence:
 
 1. Team started line (`Team started: <name>`)
 2. tmux target and worker pane id
-3. task state from read-only `skc team status <team>`, mutating `skc team monitor <team>`, or `.skc/_session-{sessionid}/state/team/<team>/tasks/task-1.json`
+3. task state from read-only `skc octo status <team>`, mutating `skc octo monitor <team>`, or `.skc/_session-{sessionid}/state/team/<team>/tasks/task-1.json`
 4. shutdown outcome (`phase=complete`, worker status `stopped`) when the run is terminal; incomplete shutdowns must report `phase=cancelled`/`failed`, and integration-blocked shutdowns must report `phase=awaiting_integration`
 
 Do not claim success without file/pane evidence.
 Do not claim clean completion if shutdown occurred with `in_progress>0`.
-Use `skc team status <team>` and `skc team monitor <team>` as the supported operator aids for status inspection; keep raw state-file or pane evidence available for manual intervention and proof.
+Use `skc octo status <team>` and `skc octo monitor <team>` as the supported operator aids for status inspection; keep raw state-file or pane evidence available for manual intervention and proof.
 
 ## Programmatic Team Orchestration
 
-Use the `skc team ...` CLI as the supported team-launch surface. For automation, drive the same CLI flow from scripts or supervising agents rather than relying on a separate runtime integration runner.
+Use the `skc octo ...` CLI for both interactive and scripted orchestration.
 
 ### Supported current surfaces
 
-- **`skc team ...` CLI** — Primary method for interactive or automated team orchestration. Use this when you want direct tmux-pane visibility or a scriptable launch path.
-- **`skc team status <team>`** — Read current team/task/worker state.
-- **`skc team monitor <team>`** — Follow live progress through the supported runtime surface.
-- **`skc team shutdown <team>`** — Stop recorded active workers and move the team toward terminal state.
-- **`skc team api <team>`** — Use only for documented programmatic operations exposed by the team runtime.
+- **`skc octo ...` CLI** — Launch with visible tmux panes.
+- **`skc octo status <team>`** — Read current team/task/worker state.
+- **`skc octo monitor <team>`** — Follow live progress.
+- **`skc octo shutdown <team>`** — Stop recorded active workers and move the team toward terminal state.
+- **`skc octo api <operation>`** — Use only for documented programmatic operations.
 - **Team state files** — Inspect `.skc/_session-{sessionid}/state/team/<team>/` when you need status, task, or mailbox evidence after launch.
 
 ### Cleanup distinction
 
-Use `skc team shutdown <team>` for recorded active workers. After shutdown reports a terminal state and required evidence is preserved, use supported `skc state ...` session/mode cleanup commands only when you are intentionally clearing state; do not delete team state by hand during an active run. Use manual tmux/session cleanup only for verified stale panes that are not handled by the documented shutdown flow.
+Use `skc octo shutdown <team>` for recorded active workers. After shutdown reports a terminal state and required evidence is preserved, use supported `skc state ...` session/mode cleanup commands only when you are intentionally clearing state; do not delete team state by hand during an active run. Use manual tmux/session cleanup only for verified stale panes that are not handled by the documented shutdown flow.
 
 ### Automation example
 
 ```
-1. skc team executor "fix bugs"
-2. skc team status <team-name>
-3. skc team shutdown <team-name>
+1. skc octo executor "fix bugs"
+2. skc octo status <team-name>
+3. skc octo shutdown <team-name>
 4. Clean up the finished team state for <team-name>
 ```
 
@@ -454,12 +454,25 @@ Use `skc team shutdown <team>` for recorded active workers. After shutdown repor
 
 **Bad:** The user says `continue`, and the workflow restarts discovery or stops before the missing verification/evidence is gathered.
 
-## Handoff back to planning or persistence
+<!-- skc:cmdref:start state -->
+### Generated command reference: state
 
-When the team task-set completes OR the user requests return to planning/persistence, mark team ready for handoff so the skill tool's chain guard permits the transition:
+When the Octo task set completes or the user requests planning or persistence, mark Octo ready for handoff.
 
+Commands:
+- `skc state octo write --input '{"current_phase":"handoff"}' --json`
+  - Marks the workflow ready for the skill-tool chain guard.
+- `skc state octo handoff --to <blueprint|sonar|voyage> --json`
+  - Bridge command run in-process by the skill tool after slash-skill dispatch.
+
+Examples:
+- handoff state write:
 ```
-skc state team write --input '{"current_phase":"handoff"}' --json
+skc state octo write --input '{"current_phase":"handoff"}' --json
 ```
 
-The skill tool then dispatches `/skill:ralplan`, `/skill:deep-interview`, or `/skill:ultragoal` same-turn and runs `skc state team handoff --to <ralplan|deep-interview|ultragoal> --json` in-process to atomically demote team, promote the callee, and sync both `.skc/_session-{sessionid}/state/skill-active-state.json` files. You do not need to run the handoff verb yourself.
+Aliases and bridges:
+- octo -> blueprint|sonar|voyage: `skc state octo handoff --to <blueprint|sonar|voyage> --json`
+<!-- skc:cmdref:end state -->
+
+The skill tool dispatches `/skill:blueprint`, `/skill:sonar`, or `/skill:voyage` in the same turn. It atomically switches workflows and syncs both active-state files; do not run the handoff verb separately.

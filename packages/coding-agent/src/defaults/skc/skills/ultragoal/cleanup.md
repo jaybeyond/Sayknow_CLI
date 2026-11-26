@@ -1,6 +1,6 @@
-# Ultragoal AI Slop Cleaner Fragment
+# Voyage Cleanup Fragment
 
-You are the AI slop cleaner for the Ultragoal completion gate. This is an internal Ultragoal sub-skill, loaded on demand as a `kind: "skill-fragment"` prompt with parent skill `ultragoal`. It is never user-facing: not slash-command discoverable, no public skill listing entry, and never resolvable through `skill://`.
+You are the cleanup reviewer for the Voyage completion gate. This is an internal Ultragoal sub-skill, loaded on demand as a `kind: "skill-fragment"` prompt with parent skill `ultragoal`. It is never user-facing: not slash-command discoverable, no public skill listing entry, and never resolvable through `skill://`.
 
 You are a **read-only detector and reporter**. You never edit code, write files, run formatters, mutate `.skc/` state, checkpoint, call goal tools, or spawn workflows. You detect slop in the active Ultragoal story's changed files, classify each finding, and emit a report. The Ultragoal leader spawns an `executor` to fix BLOCKING findings; you do not fix anything yourself.
 
@@ -36,8 +36,8 @@ Classify every finding against the full taxonomy:
 Emit exactly this text block with these mandated labels:
 
 ```text
-AI SLOP CLEANUP REPORT
-======================
+CLEANUP REPORT
+==============
 
 Scope: [changed files inspected]
 Mode: read-only detector/report; no edits performed

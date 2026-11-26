@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { taskItemSchema } from "../../src/task/types";
 import {
 	assignmentRequestsUltragoalRedTeam,
 	parseExecutorExecutionMode,
@@ -61,13 +62,24 @@ describe("assignmentRequestsUltragoalRedTeam", () => {
 });
 
 describe("typed executionMode (#2698 / #2456)", () => {
+	test.each(["attack", "ultragoal-red-team", "ultragoal_red_team"])("task input accepts %s", executionMode => {
+		const task = taskItemSchema.parse({
+			id: "Verify",
+			description: "Verify the fix",
+			assignment: "Check compatibility",
+			executionMode,
+		});
+		expect(parseExecutorExecutionMode(task.executionMode)).toBe("attack");
+	});
 	test("parseExecutorExecutionMode accepts aliases and rejects junk", () => {
 		expect(parseExecutorExecutionMode("default")).toBe("default");
 		expect(parseExecutorExecutionMode("implement")).toBe("default");
-		expect(parseExecutorExecutionMode("ultragoal-red-team")).toBe("ultragoal-red-team");
-		expect(parseExecutorExecutionMode("ultragoal_red_team")).toBe("ultragoal-red-team");
-		expect(parseExecutorExecutionMode("red-team")).toBe("ultragoal-red-team");
-		expect(parseExecutorExecutionMode("executor-qa")).toBe("ultragoal-red-team");
+		expect(parseExecutorExecutionMode("attack")).toBe("attack");
+		expect(parseExecutorExecutionMode("ATTACK")).toBe("attack");
+		expect(parseExecutorExecutionMode("ultragoal-red-team")).toBe("attack");
+		expect(parseExecutorExecutionMode("ultragoal_red_team")).toBe("attack");
+		expect(parseExecutorExecutionMode("red-team")).toBe("attack");
+		expect(parseExecutorExecutionMode("executor-qa")).toBe("attack");
 		expect(parseExecutorExecutionMode("")).toBeUndefined();
 		expect(parseExecutorExecutionMode("banana")).toBeUndefined();
 		expect(parseExecutorExecutionMode(42)).toBeUndefined();

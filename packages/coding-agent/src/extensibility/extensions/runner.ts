@@ -9,6 +9,7 @@ import type { ModelRegistry } from "../../config/model-registry";
 import type { WorkflowGateEmitter } from "../../modes/shared/agent-wire/workflow-gate-broker";
 import { type Theme, theme } from "../../modes/theme/theme";
 import { createReadonlySessionManager, type SessionManager } from "../../session/session-manager";
+import { isReservedSkcWorkflowCommand } from "../../skill-state/canonical-skills";
 import type {
 	AfterProviderResponseEvent,
 	BeforeAgentStartEvent,
@@ -508,7 +509,7 @@ export class ExtensionRunner {
 		const commands = new Map<string, RegisteredCommand>();
 		for (const ext of this.extensions) {
 			for (const command of ext.commands.values()) {
-				if (reserved?.has(command.name)) {
+				if (reserved?.has(command.name) || isReservedSkcWorkflowCommand(command.name)) {
 					const message = `Extension command '${command.name}' from ${ext.path} conflicts with built-in commands. Skipping.`;
 					this.#commandDiagnostics.push({ type: "warning", message, path: ext.path });
 					if (!this.hasUI()) {
@@ -528,6 +529,7 @@ export class ExtensionRunner {
 	}
 
 	getCommand(name: string): RegisteredCommand | undefined {
+		if (isReservedSkcWorkflowCommand(name)) return undefined;
 		for (let index = this.extensions.length - 1; index >= 0; index -= 1) {
 			const command = this.extensions[index]?.commands.get(name);
 			if (command) {

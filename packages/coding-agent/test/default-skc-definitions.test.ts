@@ -91,10 +91,10 @@ describe("default SKC definitions", () => {
 			"ultragoal",
 		]);
 		expect(fragmentDefinitions.map(definition => definition.relativePath).sort()).toEqual([
-			"skill-fragments/deep-interview/auto-answer-uncertain.md",
-			"skill-fragments/deep-interview/auto-research-greenfield.md",
-			"skill-fragments/deep-interview/lateral-review-panel.md",
-			"skill-fragments/ultragoal/ai-slop-cleaner.md",
+			"skill-fragments/deep-interview/autofill.md",
+			"skill-fragments/deep-interview/panel.md",
+			"skill-fragments/deep-interview/research.md",
+			"skill-fragments/ultragoal/cleanup.md",
 			"skill-fragments/ultragoal/pipeline-validation-contracts.md",
 		]);
 		const team = workflowDefinitions.find(definition => definition.name === "team");
@@ -177,9 +177,9 @@ describe("default SKC definitions", () => {
 		expect(fragments).toHaveLength(3);
 		expect(fragments.map(fragment => fragment.kind)).toEqual(["skill-fragment", "skill-fragment", "skill-fragment"]);
 		expect(fragments.map(fragment => fragment.relativePath).sort()).toEqual([
-			"skill-fragments/deep-interview/auto-answer-uncertain.md",
-			"skill-fragments/deep-interview/auto-research-greenfield.md",
-			"skill-fragments/deep-interview/lateral-review-panel.md",
+			"skill-fragments/deep-interview/autofill.md",
+			"skill-fragments/deep-interview/panel.md",
+			"skill-fragments/deep-interview/research.md",
 		]);
 		expect(fragments.every(fragment => fragment.content.includes("read-only architect"))).toBe(true);
 	});
@@ -195,11 +195,11 @@ describe("default SKC definitions", () => {
 		expect(fragments).toHaveLength(2);
 		expect(fragments.map(fragment => fragment.kind)).toEqual(["skill-fragment", "skill-fragment"]);
 		expect(fragments.map(fragment => fragment.relativePath).sort()).toEqual([
-			"skill-fragments/ultragoal/ai-slop-cleaner.md",
+			"skill-fragments/ultragoal/cleanup.md",
 			"skill-fragments/ultragoal/pipeline-validation-contracts.md",
 		]);
-		const cleaner = fragments.find(fragment => fragment.relativePath.endsWith("ai-slop-cleaner.md"))!;
-		expect(cleaner.content).toContain("AI SLOP CLEANUP REPORT");
+		const cleaner = fragments.find(fragment => fragment.relativePath.endsWith("cleanup.md"))!;
+		expect(cleaner.content).toContain("CLEANUP REPORT");
 		expect(cleaner.content).toContain("read-only detector");
 		const contracts = fragments.find(fragment => fragment.relativePath.endsWith("pipeline-validation-contracts.md"))!;
 		expect(contracts.content).toContain("never user-facing");
@@ -208,12 +208,12 @@ describe("default SKC definitions", () => {
 
 	it("authors the ai-slop-cleaner fragment with the mandated report labels and full taxonomy", () => {
 		const fragment = getEmbeddedDefaultSkcSkillFragments("ultragoal").find(candidate =>
-			candidate.relativePath.endsWith("ai-slop-cleaner.md"),
+			candidate.relativePath.endsWith("cleanup.md"),
 		)!;
 		const content = fragment.content;
 
 		for (const label of [
-			"AI SLOP CLEANUP REPORT",
+			"CLEANUP REPORT",
 			"Scope:",
 			"Mode: read-only detector/report; no edits performed",
 			"Blocking Findings",
@@ -263,7 +263,7 @@ describe("default SKC definitions", () => {
 		const afterStart = content.indexOf("\n## ", sectionStart + 1);
 		const section = content.slice(sectionStart, afterStart === -1 ? undefined : afterStart);
 
-		const cleanerStep = section.indexOf("2. Run the internal ai-slop-cleaner skill fragment");
+		const cleanerStep = section.indexOf("2. Run the internal cleanup skill fragment");
 		const verifyStep = section.indexOf("3. Rerun verification after the cleaner pass");
 		const architectStep = section.indexOf("4. Delegate an `architect` review");
 		const redTeamStep = section.indexOf("5. Delegate an `executor` QA/red-team lane");
@@ -460,9 +460,7 @@ describe("default SKC definitions", () => {
 		const architect = getBundledAgent("architect");
 		const critic = getBundledAgent("critic");
 
-		expect(prompt.render(executor?.systemPrompt ?? "", { ultragoalRedTeam: false })).not.toContain(
-			"<ultragoal_red_team_mode>",
-		);
+		expect(prompt.render(executor?.systemPrompt ?? "", { ultragoalRedTeam: false })).not.toContain("<attack_mode>");
 		for (const agent of [planner, architect, critic]) {
 			expect(agent?.systemPrompt).toContain("SKC_RALPLAN_ARTIFACT");
 			expect(agent?.systemPrompt).toContain(`--stage ${agent?.name}`);
@@ -550,12 +548,12 @@ Project executor override body.
 
 		// B: validation-batch contract summary in the SKILL; full contract in the fragment.
 		expect(ultragoal).toContain("## Validation batches (aggregate-only)");
-		expect(ultragoal).toContain("--validation-batch-json");
+		expect(ultragoal).toContain("--batch-json");
 		expect(ultragoal).toContain("aggregate-only");
 		expect(ultragoal).toContain("fail-closed");
-		expect(ultragoal).toContain("deferredToBatch");
-		expect(ultragoal).toContain("validation-batch-deferred");
-		expect(ultragoal).toContain("validationBatchClose");
+		expect(ultragoal).toContain("batchDeferred");
+		expect(ultragoal).toContain("batch-deferred");
+		expect(ultragoal).toContain("batchClose");
 		expect(ultragoal).toContain("mutually exclusive");
 		expect(ultragoal).toContain("no batch/pipeline mixing");
 		expect(ultragoal).toContain("out-of-order close is rejected");
@@ -566,9 +564,9 @@ Project executor override body.
 		const contracts = getEmbeddedDefaultSkcSkillFragments("ultragoal").find(fragment =>
 			fragment.relativePath.endsWith("pipeline-validation-contracts.md"),
 		)!;
-		expect(contracts.content).toContain("deferredToBatch");
-		expect(contracts.content).toContain("validation-batch-deferred");
-		expect(contracts.content).toContain("validationBatchClose");
+		expect(contracts.content).toContain("batchDeferred");
+		expect(contracts.content).toContain("batch-deferred");
+		expect(contracts.content).toContain("batchClose");
 		expect(contracts.content).toContain("out-of-order close is rejected");
 		expect(contracts.content).toContain("append-only proof");
 		expect(contracts.content).toContain("Never stamp");
@@ -628,22 +626,23 @@ Project executor override body.
 			"Ambiguous implementation asks with a missing target, scope, acceptance criteria, or safety boundary",
 		);
 		expect(routing).toContain("Informational questions are answer-only/read-only");
-		expect(routing).toContain("Vague requirements use `/skill:deep-interview`");
+		expect(routing).toContain("Vague requirements use `/skill:sonar`");
 		expect(routing).toContain("requirements-only workflow that must not mutate product code");
-		expect(routing).toContain("`/skill:ralplan --deliberate`");
-		expect(routing).toContain("`/skill:ultragoal`");
-		expect(routing).toContain("`/skill:team`");
+		expect(routing).toContain("`/skill:blueprint --deliberate`");
+		expect(routing).toContain("`/skill:voyage`");
+		expect(routing).toContain("`/skill:octo`");
 		expect(routing).toContain("Delegate large implementation slices to `executor`");
 		expect(routing).toContain("Frontend UI/UX work");
 		expect(routing).toContain("emil-design-eng");
 		expect(routing).toContain("These are bundled; do not ask the user to install them");
+		expect(routing).toContain("Read the selected example's source before implementing");
 		expect(routing).toContain("Security review work");
 		expect(routing).toContain("MUST invoke the bundled `security-review` skill");
 		expect(routing).toContain("read the full skill text and follow it exactly");
 		expect(routing).toContain(
 			"Before explicit execution approval, planning and interview workflows NEVER edit product source",
 		);
-		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(11);
+		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(12);
 		expect(decomposition).toMatch(/skip it for one-step or obvious two-step fixes/i);
 	});
 
@@ -667,7 +666,7 @@ Project executor override body.
 		expect(team).toContain("current-session active SKC goal snapshot");
 		expect(ultragoal).toContain("current-session SKC goal snapshot");
 		for (const content of [team, ultragoal]) {
-			expect(content).toContain("Workers must not run `skc ultragoal checkpoint`");
+			expect(content).toContain("Workers must not run `skc voyage checkpoint`");
 			expect(content).toContain("checkpoint authority stays with the leader");
 			expect(content).toContain("Ultragoal does not auto-launch Team");
 			expect(content).toContain("performs no hidden goal mutation");
@@ -755,7 +754,7 @@ Project executor override body.
 		expect(initial.files.filter(file => file.kind === "skill-fragment")).toHaveLength(5);
 
 		const installedResearchFragment = await Bun.file(
-			path.join(targetRoot, "skill-fragments", "deep-interview", "auto-research-greenfield.md"),
+			path.join(targetRoot, "skill-fragments", "deep-interview", "research.md"),
 		).text();
 		expect(installedResearchFragment).toContain("ranked candidate answers");
 		await Bun.write(deepInterviewSkillPath, "local edit");
@@ -774,6 +773,20 @@ Project executor override body.
 		expect(
 			forced.files.some(file => file.kind === "skill-fragment" && file.parentSkillName === "deep-interview"),
 		).toBe(true);
+	});
+
+	it("refreshes renamed fragments alongside the legacy files without changing them in check mode", async () => {
+		const targetRoot = await makeTempRoot();
+		const legacy = Bun.file(path.join(targetRoot, "skill-fragments", "ultragoal", "ai-slop-cleaner.md"));
+		const renamed = Bun.file(path.join(targetRoot, "skill-fragments", "ultragoal", "cleanup.md"));
+		await Bun.write(legacy, "local cleanup override");
+		const check = await installDefaultSkcDefinitions({ targetRoot, check: true });
+		expect(check.files.find(file => file.path === renamed.name)?.status).toBe("missing");
+		expect(await renamed.exists()).toBe(false);
+		const refresh = await installDefaultSkcDefinitions({ targetRoot, refreshOnly: true });
+		expect(refresh.written).toBe(1);
+		expect(await Bun.file(renamed.name!).text()).toContain("CLEANUP REPORT");
+		expect(await legacy.text()).toBe("local cleanup override");
 	});
 
 	it("refreshOnly rewrites stale local copies but never materializes missing ones", async () => {
@@ -949,10 +962,10 @@ describe("bundled skills CLI", () => {
 		expect(exitCode).toBe(0);
 		expect(stderr).toBe("");
 		const parsed = JSON.parse(stdout) as { name: string; path: string; source: string; content: string };
-		expect(parsed.name).toBe("ultragoal");
+		expect(parsed.name).toBe("voyage");
 		expect(parsed.path).toBe("embedded:skc/skills/ultragoal/SKILL.md");
 		expect(parsed.source).toBe("bundled:default");
-		expect(parsed.content).toContain("# Ultragoal");
+		expect(parsed.content).toContain("# Voyage: Durable Goal Execution");
 	});
 
 	it("lists embedded default workflow skills plus bundled UI and security skills", async () => {
@@ -986,16 +999,16 @@ describe("bundled skills CLI", () => {
 		expect(stderr).toBe("");
 		const parsed = JSON.parse(stdout) as { skills: Array<{ name: string; path: string }> };
 		const expected = [
-			...DEFAULT_SKC_DEFINITION_NAMES,
+			"sonar",
+			"blueprint",
+			"octo",
+			"voyage",
 			...BUNDLED_SKC_UI_SKILL_NAMES,
 			...BUNDLED_SKC_SECURITY_SKILL_NAMES,
 		].sort();
 		expect(parsed.skills.map(skill => skill.name).sort()).toEqual(expected);
-		expect(
-			parsed.skills
-				.filter(skill => (DEFAULT_SKC_DEFINITION_NAMES as readonly string[]).includes(skill.name))
-				.every(skill => skill.path.startsWith("embedded:skc/skills/")),
-		).toBe(true);
+		const workflows = parsed.skills.filter(skill => skill.path.startsWith("embedded:skc/skills/"));
+		expect(workflows.map(skill => skill.name).sort()).toEqual(["blueprint", "octo", "sonar", "voyage"]);
 		expect(parsed.skills.some(skill => skill.name === "emil-design-eng")).toBe(true);
 		expect(
 			parsed.skills

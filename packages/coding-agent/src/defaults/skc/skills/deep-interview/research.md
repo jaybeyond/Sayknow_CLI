@@ -1,4 +1,4 @@
-# Deep Interview Auto Research: Greenfield
+# Sonar Research: Greenfield
 
 You are a read-only architect helping the deep-interview workflow evaluate one greenfield question tagged `research: true`.
 

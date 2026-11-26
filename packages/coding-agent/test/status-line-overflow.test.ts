@@ -169,6 +169,19 @@ describe("status line version display", () => {
 		expect(visibleWidth(lines[0])).toBeLessThanOrEqual(12);
 		expect(lines[0]).not.toContain("v9.8.7");
 	});
+
+	it("keeps the default workspace unchanged when only the version does not fit", () => {
+		const build = (version?: string) => {
+			const component = new StatusLineComponent(createStatusLineSession(""), { version });
+			component.updateSettings({ preset: "default", showSkillHud: false });
+			return component;
+		};
+		const withoutVersion = build();
+		const withVersion = build("9.8.7");
+		const width = visibleWidth(Bun.stripANSI(withoutVersion.render(100)[0]).trim());
+		expect(Bun.stripANSI(withVersion.render(100)[0])).toContain("v9.8.7");
+		expect(withVersion.render(width)).toEqual(withoutVersion.render(width));
+	});
 });
 
 describe("path segment truncation at varying maxLength", () => {

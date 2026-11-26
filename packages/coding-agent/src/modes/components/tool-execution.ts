@@ -33,7 +33,7 @@ import {
 } from "../../tools/json-tree";
 import { formatExpandHint, replaceTabs, resolveImageOptions, truncateToWidth } from "../../tools/render-utils";
 import { toolRenderers } from "../../tools/renderers";
-import { renderStatusLine } from "../../tui";
+import { renderStatusLine, sanitizeStatusLineText } from "../../tui";
 import { containsSixelSequence, getSixelLineMask, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
 
@@ -76,6 +76,7 @@ function cloneToolArgs<T>(args: T): T {
 // registry) because it is a rendering-perf capability of these renderers, not a
 // tool-registration concern.
 const READONLY_ARG_RENDERER_TOOLS = new Set(["bash", "recipe", "eval", "edit", "apply_patch"]);
+const COLLAPSED_SUMMARY_TOOLS = new Set(["bash", "eval", "grep", "find", "ls"]);
 
 function argsCanBeSharedWithRenderer(toolName: string, tool: AgentTool | undefined): boolean {
 	return !tool?.renderCall && !tool?.renderResult && READONLY_ARG_RENDERER_TOOLS.has(toolName);
@@ -604,6 +605,28 @@ export class ToolExecutionComponent extends Container {
 	override render(width: number): string[] {
 		if (this.#displayBuiltWithGraphicsFallback !== isTerminalGraphicsFallbackActive()) {
 			this.#updateDisplay();
+		}
+		if (
+			!this.#expanded &&
+			!this.#isPartial &&
+			this.#result &&
+			!this.#result.isError &&
+			!this.#tool?.renderCall &&
+			!this.#tool?.renderResult &&
+			COLLAPSED_SUMMARY_TOOLS.has(this.#toolName) &&
+			this.#getAllImageBlocks().length === 0 &&
+			!containsSixelSequence(this.#getTextOutput())
+		) {
+			const title = renderStatusLine({ icon: "success", title: this.#toolLabel, titleColor: "muted" }, theme);
+			const output = this.#getTextOutput().trimStart().split("\n", 1)[0];
+			const args = this.#args && typeof this.#args === "object" ? (this.#args as Record<string, unknown>) : {};
+			const description = output || formatArgsInline(args, 70);
+			const hint = formatExpandHint(theme);
+			const lead = ` ${title}`;
+			const remaining = width - Bun.stringWidth(`${lead}  ${hint}`);
+			const detail =
+				remaining > 1 && description ? ` ${truncateToWidth(sanitizeStatusLineText(description), remaining)}` : "";
+			return ["", truncateToWidth(`${lead}${detail}${remaining >= 0 ? ` ${hint}` : ""}`, width)];
 		}
 		return super.render(width);
 	}

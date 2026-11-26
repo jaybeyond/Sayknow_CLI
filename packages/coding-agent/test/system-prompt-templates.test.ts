@@ -116,11 +116,11 @@ test("executor red-team block renders only for ultragoal completion QA assignmen
 	expect(executor).toBeDefined();
 
 	const ordinary = prompt.render(executor!.systemPrompt, { ultragoalRedTeam: false });
-	expect(ordinary).not.toContain("<ultragoal_red_team_mode>");
+	expect(ordinary).not.toContain("<attack_mode>");
 
 	const redTeam = prompt.render(executor!.systemPrompt, { ultragoalRedTeam: true });
-	expect(redTeam).toContain("<ultragoal_red_team_mode>");
-	expect(redTeam).toContain("executorQa");
+	expect(redTeam).toContain("<attack_mode>");
+	expect(redTeam).toContain("attackStatus");
 });
 
 describe("system Handlebars prompt templates", () => {
@@ -295,7 +295,7 @@ describe("system Handlebars prompt templates", () => {
 		expect(countOccurrences(rendered, "Informational questions are answer-only/read-only")).toBe(1);
 		expect(rendered).toContain("unless the user explicitly requests a change, command, or execution");
 		expect(rendered).toContain("Clear, low-risk implementation requests use direct tools");
-		expect(rendered).toContain("Vague requirements use `/skill:deep-interview`");
+		expect(rendered).toContain("Vague requirements use `/skill:sonar`");
 	});
 
 	test("keeps system and project as separate ordered blocks; volatile facts excluded from stable prefix", async () => {

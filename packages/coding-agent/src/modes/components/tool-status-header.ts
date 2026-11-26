@@ -167,6 +167,8 @@ interface CollectedStatusSegments {
 	rightSepWidth: number;
 	leftCapWidth: number;
 	rightCapWidth: number;
+	optionalRightCount: number;
+	prioritizeWorkspace: boolean;
 }
 
 // StatusLineComponent
@@ -937,6 +939,8 @@ export class StatusLineComponent implements Component {
 			rightSepWidth: visibleWidth(separatorDef.right),
 			leftCapWidth: separatorDef.endCaps ? visibleWidth(separatorDef.endCaps.right) : 0,
 			rightCapWidth: separatorDef.endCaps ? visibleWidth(separatorDef.endCaps.left) : 0,
+			optionalRightCount: actionHints.length + (this.#version ? 1 : 0),
+			prioritizeWorkspace: effectiveSettings.preset === "default",
 		};
 	}
 
@@ -960,6 +964,17 @@ export class StatusLineComponent implements Component {
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
 
 		if (topFillWidth > 0) {
+			if (seg.prioritizeWorkspace) {
+				for (let i = 0; i < seg.optionalRightCount && totalWidth() > topFillWidth; i++) {
+					right.pop();
+					rightWidth = this.#groupWidth(right, rightCapWidth, rightSepWidth);
+				}
+				while (totalWidth() > topFillWidth && (leftIds.at(-1) === "git" || leftIds.at(-1) === "pr")) {
+					left.pop();
+					leftIds.pop();
+					leftWidth = this.#groupWidth(left, leftCapWidth, leftSepWidth);
+				}
+			}
 			// Shrink path before dropping right-side telemetry — path is the only elastic segment,
 			// and presets such as default-usage should not hide usage just because cwd is long.
 			const pathIdx = leftIds.indexOf("path");

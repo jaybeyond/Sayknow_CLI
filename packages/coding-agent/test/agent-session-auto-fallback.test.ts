@@ -50,7 +50,7 @@ function quotaStream(model: Model): AssistantMessageEventStream {
 }
 
 function successfulStream(model: Model): AssistantMessageEventStream {
-	return createMockModel({ responses: [{ content: ["ok"] }] }).stream(model, {
+	return createMockModel({ id: model.id, provider: model.provider, responses: [{ content: ["ok"] }] }).stream(model, {
 		systemPrompt: [],
 		messages: [],
 		tools: [],
@@ -132,6 +132,47 @@ describe("AgentSession automatic model fallback", () => {
 		expect(session!.settings.getModelRole("default")).toBe(selector(primary));
 	});
 
+	it("rechecks a configured primary credential before switching to an automatic candidate", async () => {
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		const { calls, switches } = createSession({}, successfulStream);
+		await session!.prompt("first turn");
+		await session!.waitForIdle();
+		const registry = session!.modelRegistry;
+		const getApiKey = registry.getApiKey.bind(registry);
+		let miss = true;
+		vi.spyOn(registry, "getApiKey").mockImplementation((model, ...args) => {
+			if (model.provider === primary.provider && miss) {
+				miss = false;
+				return Promise.resolve(undefined);
+			}
+			return getApiKey(model, ...args);
+		});
+
+		await session!.prompt("hello");
+		await session!.waitForIdle();
+
+		expect(switches).toEqual([]);
+		expect(calls).toEqual([selector(primary), selector(primary)]);
+	});
+
+	it("keeps the primary selected when configured credentials cannot be obtained on either check", async () => {
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		const { calls, switches } = createSession({}, successfulStream);
+		const registry = session!.modelRegistry;
+		const getApiKey = registry.getApiKey.bind(registry);
+		const lookup = vi.spyOn(registry, "getApiKey").mockImplementation((model, ...args) => {
+			if (model.provider === primary.provider) return Promise.resolve(undefined);
+			return getApiKey(model, ...args);
+		});
+
+		await expect(session!.prompt("hello")).rejects.toThrow("automatic model fallback was not attempted");
+		expect(lookup.mock.calls.map(([model]) => selector(model))).toEqual([selector(primary), selector(primary)]);
+		expect(selector(session!.model!)).toBe(selector(primary));
+		expect(calls).toEqual([]);
+		expect(switches).toEqual([]);
+	});
 	it("moves to another logged-in provider mid-turn when the default is out of quota", async () => {
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		authStorage.setRuntimeApiKey("openai", "test-key");

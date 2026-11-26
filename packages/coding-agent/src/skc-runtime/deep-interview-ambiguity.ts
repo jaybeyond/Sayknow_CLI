@@ -92,7 +92,7 @@ function countUnscoredActiveComponents(topology: unknown): number {
 }
 
 function autoAnswerRatio(inner: Record<string, unknown>): number {
-	const autoAnswered = asArray(inner.auto_answered_rounds).length;
+	const autoAnswered = new Set([...asArray(inner.auto_answered_rounds), ...asArray(inner.autofill_rounds)]).size;
 	if (autoAnswered === 0) return 0;
 	const scored = asArray(inner.rounds).filter(round => isPlainObject(round) && round.lifecycle === "scored").length;
 	return Math.min(1, autoAnswered / Math.max(scored, 1));

@@ -59,7 +59,7 @@ import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-ski
 import { checkComposerBashPolicy } from "./composer-bash-policy";
 import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { formatToolWorkingDirectory, replaceTabs } from "./render-utils";
+import { formatExpandHint, formatToolWorkingDirectory, replaceTabs } from "./render-utils";
 import { assertCwdInsideWorkspace } from "./restricted-cwd";
 import { checkTmuxSelfInjection } from "./tmux-self-injection-guard";
 import { ToolAbortError, ToolError } from "./tool-errors";
@@ -1462,12 +1462,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 							const textContent = styledOutput;
 							const result = truncateToVisualLines(textContent, previewLines, width);
 							if (result.skippedCount > 0) {
-								outputLines.push(
-									uiTheme.fg(
-										"dim",
-										`… (${result.skippedCount} earlier lines, showing ${result.visualLines.length} of ${result.skippedCount + result.visualLines.length}) (ctrl+o to expand)`,
-									),
+								const summary = uiTheme.fg(
+									"dim",
+									`… (${result.skippedCount} earlier lines, showing ${result.visualLines.length} of ${result.skippedCount + result.visualLines.length})`,
 								);
+								const hint = formatExpandHint(uiTheme, expanded);
+								outputLines.push(hint ? `${summary} ${hint}` : summary);
 							}
 							outputLines.push(...result.visualLines);
 						}

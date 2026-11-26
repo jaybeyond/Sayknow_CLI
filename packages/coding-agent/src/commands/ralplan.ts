@@ -2,13 +2,13 @@ import { Command } from "@sayknow-cli/utils/cli";
 import { runNativeRalplanCommand } from "../skc-runtime/ralplan-runtime";
 
 export default class Ralplan extends Command {
-	static description = "Run native SKC RALPLAN consensus planning workflow";
+	static description = "Run Blueprint, SKC's consensus planning workflow";
 	static strict = false;
 	static examples = [
-		'$ skc ralplan "<task description>"',
-		'$ skc ralplan --interactive --deliberate "<task description>"',
-		'$ skc ralplan --write --stage planner --stage_n 1 --artifact "<markdown or path>"',
-		"$ skc ralplan --write --stage critic --stage_n 1 --artifact-env SKC_RALPLAN_ARTIFACT",
+		'$ skc blueprint "<task description>"',
+		'$ skc blueprint --interactive --deliberate "<task description>"',
+		'$ skc blueprint --write --stage planner --stage_n 1 --artifact "<markdown or path>"',
+		"$ skc blueprint --write --stage critic --stage_n 1 --artifact-env SKC_RALPLAN_ARTIFACT",
 	];
 
 	async run(): Promise<void> {

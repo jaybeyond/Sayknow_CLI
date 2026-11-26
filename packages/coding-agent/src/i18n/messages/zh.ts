@@ -22,6 +22,7 @@ export const zh: Partial<Record<MsgKey, string>> = {
 	"composer.steer": "引导",
 	"composer.queue": "排队",
 	"composer.newLine": "换行",
+	"tools.expandHint": "展开",
 	"settings.title": "设置",
 	"settings.preview": "预览:",
 	"settings.tabCycle": "Tab 切换",

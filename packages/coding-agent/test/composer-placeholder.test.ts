@@ -1,11 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { KeybindingsManager } from "../src/config/keybindings";
 import { getLanguage, setLanguage } from "../src/i18n";
-import {
-	getComposerActions,
-	getComposerPlaceholder,
-	getDefaultComposerPlaceholder,
-} from "../src/modes/interactive-mode";
+import { getComposerPlaceholder, getDefaultComposerPlaceholder } from "../src/modes/interactive-mode";
 
 // Assertions read English labels; a non-English system locale must not leak in.
 const originalLanguage = getLanguage();
@@ -70,38 +66,12 @@ describe("composer placeholder", () => {
 		setLanguage("ko");
 		try {
 			expect(getDefaultComposerPlaceholder({ platform: "darwin" })).toBe("메시지 입력 · ⇧↩/⌃J 줄바꿈");
-			const keybindings = KeybindingsManager.inMemory({ "tui.input.submit": "enter" });
+			const keybindings = KeybindingsManager.inMemory({ "tui.input.submit": "enter", "app.message.queue": "alt+q" });
 			expect(
-				getComposerActions(keybindings, { platform: "darwin" }, { busy: false, busyPromptMode: "steer" }).map(
-					action => action.label,
-				),
-			).toEqual(["@ 첨부", "↩ 보내기"]);
+				getComposerPlaceholder(keybindings, { platform: "darwin" }, { busy: true, busyPromptMode: "steer" }),
+			).toBe("메시지 입력 · ↩ 방향 지시 · ⌥Q 대기열 · ⇧↩/⌃J 줄바꿈");
 		} finally {
 			setLanguage("en");
 		}
-	});
-});
-
-describe("composer actions", () => {
-	const keybindings = KeybindingsManager.inMemory({ "tui.input.submit": "enter" });
-	const labels = (busy: boolean, busyPromptMode: "steer" | "queue", platform: NodeJS.Platform = "darwin") =>
-		getComposerActions(keybindings, { platform }, { busy, busyPromptMode }).map(action => action.label);
-
-	it("names what the submit key does now, with that key", () => {
-		expect(labels(false, "steer")).toEqual(["@ Attach", "↩ Send"]);
-		expect(labels(true, "steer")).toEqual(["@ Attach", "↩ Steer"]);
-		expect(labels(true, "queue")).toEqual(["@ Attach", "↩ Queue"]);
-		expect(labels(false, "steer", "linux")).toEqual(["@ Attach", "Enter Send"]);
-	});
-
-	it("marks only the submit action as primary", () => {
-		const actions = getComposerActions(keybindings, { platform: "darwin" }, { busy: false, busyPromptMode: "steer" });
-		expect(actions.filter(action => action.primary).map(action => action.label)).toEqual(["↩ Send"]);
-	});
-
-	it("drops the key when submit is unbound", () => {
-		const unbound = KeybindingsManager.inMemory({ "tui.input.submit": [] });
-		const actions = getComposerActions(unbound, { platform: "darwin" }, { busy: false, busyPromptMode: "steer" });
-		expect(actions.map(action => action.label)).toEqual(["@ Attach", "Send"]);
 	});
 });

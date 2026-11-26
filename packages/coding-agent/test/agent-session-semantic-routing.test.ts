@@ -213,7 +213,7 @@ describe("AgentSession semantic workflow routing", () => {
 			{ semanticWorkflowRouting: true },
 		);
 		// No enumerated workflow keyword and no UI pattern: both questions are open.
-		const turn = session.prompt("이 부분 손보기 전에 어떻게 갈지부터 같이 정하고 넘어가자");
+		const turn = session.prompt("답변 스트리밍을 넣기 전에 어떻게 갈지부터 같이 정하고 넘어가자");
 		await waitFor(() => calls.length >= 2);
 
 		expect(calls[0]?.questions).toEqual(["workflow", "uiSkill"]);
@@ -230,6 +230,8 @@ describe("AgentSession semantic workflow routing", () => {
 		expect(prelude).toContain("`animate`");
 		expect(prelude).toContain("semantic match");
 		expect(prelude).toContain("`emil-design-eng`");
+		expect(prelude).toContain("https://designbookmark.com/motion#db-streaming-reply");
+		expect(prelude).toContain("https://designbookmark.com/motion-src/code/db-streaming-reply.txt");
 
 		await session.abort();
 		await turn.catch(() => {});

@@ -5,7 +5,8 @@ import { initTheme } from "@sayknow-cli/coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@sayknow-cli/coding-agent/modes/types";
 import { UiHelpers } from "@sayknow-cli/coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@sayknow-cli/coding-agent/session/session-manager";
-import { Container } from "@sayknow-cli/tui";
+import { Container, visibleWidth } from "@sayknow-cli/tui";
+import { getLanguage, setLanguage } from "../src/i18n";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -57,6 +58,23 @@ describe("InteractiveMode.showStatus", () => {
 		await initTheme();
 	});
 
+	test("keeps the localized update notice to one row and drops the command whole", () => {
+		const originalLanguage = getLanguage();
+		const { ctx, helpers } = createInitialRenderHarness();
+		try {
+			setLanguage("ko");
+			helpers.showNewVersionNotification("0.7.26");
+			for (const width of [52, 110]) {
+				const lines = ctx.chatContainer.render(width);
+				expect(lines.map(Bun.stripANSI)).toEqual([" 업데이트 0.7.26 · skc update"]);
+			}
+			const narrow = ctx.chatContainer.render(18);
+			expect(narrow.map(Bun.stripANSI)).toEqual([" 업데이트 0.7.26"]);
+			expect(visibleWidth(narrow[0])).toBeLessThanOrEqual(18);
+		} finally {
+			setLanguage(originalLanguage);
+		}
+	});
 	test("coalesces immediately-sequential status messages", () => {
 		const ctx = {
 			chatContainer: new Container(),

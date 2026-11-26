@@ -7,7 +7,7 @@ import type { SkillsSettings } from "../config/settings-schema";
 import { BUNDLED_SKC_SECURITY_SKILL_NAMES } from "../defaults/skc-security-skills";
 import { BUNDLED_SKC_UI_SKILL_NAMES } from "../defaults/skc-ui-skills";
 import { compareSkillOrder, SOURCE_PATHS, scanSkillsFromDir } from "../discovery/helpers";
-import { CANONICAL_SKC_WORKFLOW_SKILLS } from "../skill-state/canonical-skills";
+import { CANONICAL_SKC_WORKFLOW_SKILLS, SKC_WORKFLOW_PUBLIC_NAMES } from "../skill-state/canonical-skills";
 import type { Skill } from "./skills";
 
 export type RuntimeSkillDiscoverySource = "project" | "user";
@@ -37,6 +37,7 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const BUILT_IN_SKILL_NAMES = new Set<string>([
 	...CANONICAL_SKC_WORKFLOW_SKILLS,
+	...Object.values(SKC_WORKFLOW_PUBLIC_NAMES),
 	...BUNDLED_SKC_UI_SKILL_NAMES,
 	...BUNDLED_SKC_SECURITY_SKILL_NAMES,
 ]);

@@ -64,6 +64,10 @@ Source material:
 
 Use the existing design system. A one-line Sayknow-CLI wordmark anchors the launch screen; the recent-session list is the primary content, not the brand or release note. Keep build metadata quiet and omit it as a unit when it does not fit. Align the list, release note and shortcuts to the same left edge; secondary information yields before recent sessions as the terminal gets shorter. On narrow terminals, keep complete shortcut labels rather than cutting a chord or its explanation in half. Preserve the keyboard selection cursor and band, the session picker, and the missing-model action. Use theme roles and the existing color-only intro; do not add layout motion.
 
+Omit the recent-session section when empty. Keep missing-model startup guidance on one row with its configured keyboard action; detailed setup belongs in the model/provider picker. The normal status line prioritizes model, workspace, and context; version and contextual shortcuts yield first. Fallback notices state the reason without raw provider errors. Collapsed passive tool results use a quiet one-line summary; expanding restores the full renderer, and interactive prompts stay visible.
+
+The update notice is one unboxed transcript row. It shows the available version and the update command; narrow terminals drop the command as a unit before truncating the version notice.
+
 ### Frame and navigation anatomy
 
 The existing settings selector is a vertically stacked frame:
@@ -289,27 +293,14 @@ record both manifest counts as 108 plus CJK review results.
 No raw third-party design corpus, screenshot, or reference asset is stored by
 this workflow.
 
-## Composer action rail
+## Composer input row
 
-The composer is a borderless rail row on the `userMessageBg` band. Its last
-input row ends in exactly two actions, two cells apart, inside the band:
-`@ Attach` and the submit action. The submit label names what the submit key
-does now (`Send`, `Steer`, or `Queue`), prefixed by that key's display string.
-It is bold `accent` only while there is a draft to send (bold keeps the
-state visible without color); otherwise both actions are `dim`. Every other row reserves the rail's width as blank band, so typed
-text wraps before the rail and never runs under it. The rail is dropped when
-it would leave fewer than 40 cells for typing.
-
-The labels are keyboard hints first: `@` is the key that starts an attachment,
-and the submit label shows its key. With mouse reporting on, clicking Attach
-inserts `@` (preceded by a space after a word) and opens file completion, and
-clicking the submit action submits the draft: an open slash-command list
-applies its highlighted item first, any other open completion list closes, and
-a partly typed slash command is completed. Clicks reach the rail while the
-transcript is scrolled by hand and right after returning to the live view,
-because the composer stays pinned at the bottom. Placeholder hints that don't
-fit drop whole `·` entries from the end, down to the bare `Type your message`
-lead; a key hint is never cut mid-label.
+The composer is a borderless rail row on the `userMessageBg` band. The draft
+can use the full text area without reserving space for action buttons. The
+configured submit key sends the draft; while busy it steers or queues according
+to the current mode. Typing `@` still opens file completion, and paste works
+as before. Placeholder hints that do not fit drop whole `·` entries from the
+end, down to the bare `Type your message` lead; a key hint is never cut mid-label.
 
 ## Sticky transcript viewport contract
 

@@ -9,6 +9,7 @@ import { BUNDLED_SKC_UI_SKILL_NAMES } from "@sayknow-cli/coding-agent/defaults/s
 import type { Skill } from "@sayknow-cli/coding-agent/sdk";
 import { createAgentSession } from "@sayknow-cli/coding-agent/sdk";
 import { SessionManager } from "@sayknow-cli/coding-agent/session/session-manager";
+import { SKC_WORKFLOW_PUBLIC_NAMES } from "@sayknow-cli/coding-agent/skill-state/canonical-skills";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 function createIsolatedSkillsSettings(): Settings {
@@ -72,13 +73,13 @@ Loaded via symbolic link.
 
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 
-	it("loads embedded default SKC workflow skills even when .skc is absent and arbitrary skill discovery is disabled", async () => {
+	it("loads embedded default SKC workflow skills without explicit discovery settings", async () => {
 		fs.rmSync(path.join(tempDir, ".skc"), { recursive: true, force: true });
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "skills.enabled": false }),
+			settings: Settings.isolated(),
 		});
 		const expected = [
 			...DEFAULT_SKC_DEFINITION_NAMES,
@@ -89,6 +90,100 @@ Loaded via symbolic link.
 		expect(session.skills.map(skill => skill.name).sort()).toEqual(expected);
 		expect(session.skills.every(skill => skill.filePath.startsWith("embedded:skc/"))).toBe(true);
 	}, 15_000);
+
+	it("disables both workflow spellings when skills are explicitly disabled", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "skills.enabled": false }),
+		});
+		try {
+			expect(session.getAllToolNames()).not.toContain("skill");
+			for (const name of Object.entries(SKC_WORKFLOW_PUBLIC_NAMES).flat()) {
+				expect(session.resolvePromptSkillInvocation(`/skill:${name}`)).toBeUndefined();
+			}
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it.each(["deep-interview", "sonar"])("filters both reserved aliases when %s is ignored", async name => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "skills.ignoredSkills": [name] }),
+		});
+		try {
+			const tool = session.getToolByName("skill");
+			if (!tool) throw new Error("Expected skill tool for other workflows");
+			for (const spelling of ["deep-interview", "sonar"]) {
+				expect(session.resolvePromptSkillInvocation(`/skill:${spelling}`)).toBeUndefined();
+				await expect(tool.execute("test-filter", { name: spelling })).rejects.toThrow("unknown skill");
+			}
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it.each(["deep-interview", "sonar"])("shares the disabled workflow ID for %s", async name => {
+		const settings = Settings.isolated({ "skills.enabled": true, disabledExtensions: [`skill:${name}`] });
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+		});
+		try {
+			const tool = session.getToolByName("skill");
+			if (!tool) throw new Error("Expected skill tool for enabled workflows");
+			for (const spelling of ["deep-interview", "sonar"]) {
+				expect(session.resolvePromptSkillInvocation(`/skill:${spelling}`)).toBeUndefined();
+				await expect(tool.execute("test", { name: spelling })).rejects.toThrow("unknown skill");
+			}
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it.each(
+		Object.entries(SKC_WORKFLOW_PUBLIC_NAMES).flatMap(
+			([id, name]) =>
+				[
+					[id, id, name],
+					[name, id, name],
+				] as const,
+		),
+	)("dispatches %s to the same project override", async (spelling, id, publicName) => {
+		const makeProjectSkill = async (name: string, body: string) => {
+			const file = path.join(path.dirname(skillsDir), name, "SKILL.md");
+			await Bun.write(file, `---\nname: ${name}\ndescription: SDK alias fixture\n---\n\n${body}\n`);
+			return file;
+		};
+		const override = await makeProjectSkill(id, "Override body for both names.");
+		await makeProjectSkill(publicName, "Reserved collision body.");
+		const prefix = await makeProjectSkill(`${publicName}-extra`, "Prefix skill body.");
+		const manager = SessionManager.inMemory(tempDir);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: manager,
+			settings: createIsolatedSkillsSettings(),
+		});
+		try {
+			expect(session.resolvePromptSkillInvocation(`/skill:${spelling}`)?.skill.filePath).toBe(override);
+			expect(session.resolvePromptSkillInvocation(`/skill:${publicName}-extra`)?.skill.filePath).toBe(prefix);
+			const tool = session.getToolByName("skill");
+			if (!tool) throw new Error("Expected skill tool");
+			const result = await tool.execute("test-override", { name: spelling });
+			expect(result.details).toMatchObject({ name: id, path: override });
+			expect(JSON.stringify(manager.getEntries())).toContain("Override body for both names.");
+			expect(JSON.stringify(manager.getEntries())).not.toContain("Reserved collision body.");
+		} finally {
+			await session.dispose();
+		}
+	});
 
 	it("should discover skills by default and expose them on session.skills", async () => {
 		const { session } = await createAgentSession({

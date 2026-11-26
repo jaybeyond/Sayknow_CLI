@@ -816,6 +816,9 @@ export function resolveModelOverride(
  */
 export interface ModelChainResolutionOptions {
 	managedFallback?: boolean;
+	/** An inconclusive auth lookup must not select an automatic cross-provider fallback. */
+	retryPrimaryAuth?: (model: Model<Api>) => boolean;
+	signal?: AbortSignal;
 }
 
 export async function resolveModelChainWithAuth(
@@ -834,6 +837,7 @@ export async function resolveModelChainWithAuth(
 	const availableModels = modelRegistry.getAvailable();
 	const matchPreferences = { usageOrder: settings?.getStorage()?.getModelUsageOrder() };
 	const skips: Array<{ selector: string; reason: string }> = [];
+	const authOptions = options?.signal ? { signal: options.signal } : undefined;
 	for (let activeIndex = 0; activeIndex < modelPatterns.length; activeIndex += 1) {
 		const selector = modelPatterns[activeIndex];
 		const candidate = resolveModelRoleValue(selector, availableModels, {
@@ -853,7 +857,18 @@ export async function resolveModelChainWithAuth(
 				continue;
 			}
 		}
-		const key = await modelRegistry.getApiKey(candidate.model, sessionId);
+		options?.signal?.throwIfAborted();
+		let key = await modelRegistry.getApiKey(candidate.model, sessionId, authOptions);
+		options?.signal?.throwIfAborted();
+		if (!isAuthenticatedOrKeyless(key) && activeIndex === 0 && options?.retryPrimaryAuth?.(candidate.model)) {
+			key = await modelRegistry.getApiKey(candidate.model, sessionId, authOptions);
+			options.signal?.throwIfAborted();
+			if (!isAuthenticatedOrKeyless(key)) {
+				throw new Error(
+					`Could not obtain credentials for ${selector}; automatic model fallback was not attempted.`,
+				);
+			}
+		}
 		if (isAuthenticatedOrKeyless(key)) {
 			return { ...candidate, activeIndex, skips };
 		}

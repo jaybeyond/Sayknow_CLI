@@ -9,6 +9,7 @@ import {
 	loadSkills,
 	loadSkillsFromDir,
 	parseSkillInvocations,
+	resolveSkillSlashCommands,
 	type Skill,
 } from "@sayknow-cli/coding-agent/extensibility/skills";
 
@@ -36,6 +37,32 @@ function makeSkill(name: string): Skill {
 }
 
 describe("parseSkillInvocations", () => {
+	it("lists only the branded workflow names and resolves both spellings to the same skill", () => {
+		const workflows = ["deep-interview", "ralplan", "team", "ultragoal"].map(makeSkill);
+		const matchingCustom = makeSkill("sonar");
+		const prefixCustom = makeSkill("sonar-extra");
+		const commands = resolveSkillSlashCommands([matchingCustom, ...workflows, prefixCustom], new Set());
+		expect(commands.map(command => command.name)).toEqual([
+			"skill:sonar",
+			"skill:blueprint",
+			"skill:octo",
+			"skill:voyage",
+			"skill:sonar-extra",
+		]);
+		const byName = new Map(commands.map(command => [command.name, command.skill]));
+		for (const [index, branded] of ["sonar", "blueprint", "octo", "voyage"].entries()) {
+			const skill = workflows[index]!;
+			for (const spelling of [branded, skill.name]) {
+				expect(parseSkillInvocations(`/skill:${spelling} keep args`, byName)).toEqual([
+					{ commandName: `skill:${spelling}`, args: "keep args", skill },
+				]);
+			}
+		}
+		expect(parseSkillInvocations("/skill:sonar-extra", byName)[0]?.skill).toBe(prefixCustom);
+		const noWorkflow = new Map([["skill:sonar", matchingCustom]]);
+		expect(parseSkillInvocations("/skill:sonar", noWorkflow)).toEqual([]);
+		expect(parseSkillInvocations("/skill:deep-interview", noWorkflow)).toEqual([]);
+	});
 	const alpha = makeSkill("alpha");
 	const beta = makeSkill("beta");
 	const skillsByCommandName = new Map([

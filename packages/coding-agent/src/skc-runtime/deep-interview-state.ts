@@ -130,6 +130,42 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+const DEEP_INTERVIEW_STATE_KEY_ALIASES = {
+	research_rounds: "auto_researched_rounds",
+	autofill_rounds: "auto_answered_rounds",
+	autofill_streak: "auto_answer_streak",
+	panel_reviews: "lateral_reviews",
+	panel_failures: "lateral_panel_failures",
+} as const;
+
+export function assertNoDeepInterviewKeyAliasConflict(payload: unknown): void {
+	if (!isPlainObject(payload)) return;
+	const state = isPlainObject(payload.state) ? payload.state : {};
+	for (const [name, legacy] of Object.entries(DEEP_INTERVIEW_STATE_KEY_ALIASES)) {
+		if (
+			(Object.hasOwn(payload, name) || Object.hasOwn(state, name)) &&
+			(Object.hasOwn(payload, legacy) || Object.hasOwn(state, legacy))
+		) {
+			throw new Error(`deep-interview state has both ${legacy} and ${name}; use ${name} only`);
+		}
+	}
+}
+
+function mergeStateAliases(legacy: unknown, renamed: unknown): unknown {
+	if (legacy === undefined) return renamed;
+	if (Array.isArray(legacy) && Array.isArray(renamed)) {
+		const seen = new Set<string | undefined>();
+		return [...legacy, ...renamed].filter((entry: unknown) => {
+			const key = JSON.stringify(entry);
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+	}
+	if (typeof legacy === "number" && typeof renamed === "number") return Math.max(legacy, renamed);
+	return legacy;
+}
+
 /**
  * Interview transcript/scoring fields that are canonical under `state`. When a
  * legacy flattened envelope carries them at the top level they are hoisted into
@@ -202,6 +238,16 @@ const ENVELOPE_RESERVED_STATE_KEYS = [
 export function normalizeDeepInterviewEnvelope(value: unknown): DeepInterviewStateEnvelope {
 	const envelope: DeepInterviewStateEnvelope = isPlainObject(value) ? { ...value } : {};
 	const inner: Record<string, unknown> = isPlainObject(envelope.state) ? { ...envelope.state } : {};
+	// Keep the legacy on-disk shape until every writer understands the new names.
+	for (const [name, legacy] of Object.entries(DEEP_INTERVIEW_STATE_KEY_ALIASES)) {
+		const legacyValue = Object.hasOwn(inner, legacy) ? inner[legacy] : envelope[legacy];
+		const renamedValue = Object.hasOwn(inner, name) ? inner[name] : envelope[name];
+		const merged = mergeStateAliases(legacyValue, renamedValue);
+		if (merged !== undefined) inner[legacy] = merged;
+		delete inner[name];
+		delete envelope[name];
+		delete envelope[legacy];
+	}
 
 	for (const field of TRANSCRIPT_STATE_FIELDS) {
 		if (inner[field] === undefined && envelope[field] !== undefined) inner[field] = envelope[field];
@@ -332,6 +378,7 @@ export function mergeDeepInterviewEnvelope(
 	incoming: unknown,
 	options: { replace?: boolean } = {},
 ): DeepInterviewStateEnvelope {
+	assertNoDeepInterviewKeyAliasConflict(incoming);
 	const incomingEnvelope = isPlainObject(incoming) ? incoming : {};
 	const incomingNestedState = isPlainObject(incomingEnvelope.state) ? incomingEnvelope.state : {};
 	const incomingHasEstablishedFacts =

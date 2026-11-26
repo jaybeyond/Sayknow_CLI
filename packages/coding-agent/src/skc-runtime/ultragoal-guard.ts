@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import { DEFAULT_ULTRAGOAL_OBJECTIVE } from "./goal-mode-request";
 import { resolveSkcSessionForRead, SessionResolutionError } from "./session-resolution";
+import { readSignoff } from "./ultragoal-key-aliases";
 import {
 	findCleanPauseCriticVerdict,
 	findLedgerReceiptEvent,
@@ -265,19 +266,7 @@ export function validateCompletionReceipt(input: {
 	if (input.receiptKind === "final-aggregate") {
 		const checkpointEvent = findLedgerReceiptEvent(input.ledger, receipt);
 		if (checkpointEvent) {
-			const qualityGate =
-				typeof checkpointEvent.qualityGateJson === "object" &&
-				checkpointEvent.qualityGateJson !== null &&
-				!Array.isArray(checkpointEvent.qualityGateJson)
-					? (checkpointEvent.qualityGateJson as Record<string, unknown>)
-					: undefined;
-			const criticReview =
-				qualityGate &&
-				typeof qualityGate.criticReview === "object" &&
-				qualityGate.criticReview !== null &&
-				!Array.isArray(qualityGate.criticReview)
-					? (qualityGate.criticReview as Record<string, unknown>)
-					: undefined;
+			const criticReview = readSignoff(checkpointEvent.qualityGateJson);
 			if (criticReview?.verdict !== "OKAY") {
 				return {
 					state: "active_missing_critic_verdict",

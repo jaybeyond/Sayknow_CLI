@@ -82,6 +82,7 @@ import {
 	createJsonNoClobber,
 	writeJsonAtomic,
 } from "./state-writer";
+import { isBatchDependencyGroupKind } from "./ultragoal-key-aliases";
 import {
 	getUltragoalPaths,
 	readUltragoalLedger,
@@ -173,7 +174,7 @@ export interface UltragoalSuccessionCarriedGoal {
 	dependencyGroups: UltragoalSuccessionDependencyGroup[];
 }
 
-export type UltragoalSuccessionDependencyGroupKind = "validation-batch" | "review-blocker";
+export type UltragoalSuccessionDependencyGroupKind = "validation-batch" | "batch" | "review-blocker";
 
 export interface UltragoalSuccessionDependencyGroup {
 	kind: UltragoalSuccessionDependencyGroupKind;
@@ -1097,7 +1098,7 @@ function composeSuccessorObjective(
 			.join(", ");
 		lines.push(
 			"",
-			group.kind === "validation-batch"
+			isBatchDependencyGroupKind(group.kind)
 				? `Validation group ${group.groupId} carried from the source: these goals were validated as one unit and must be ` +
 						`re-validated together here. Members ${mapped}.` +
 						(group.finalSourceGoalId ? ` The source closed the group on ${group.finalSourceGoalId}.` : "")

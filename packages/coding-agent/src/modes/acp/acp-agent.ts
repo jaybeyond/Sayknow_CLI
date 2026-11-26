@@ -47,6 +47,7 @@ import { resolveAcpFinalText } from "../../sdk/acp/final-text";
 import { ACP_MCP_LIFECYCLE_TIMEOUT_MS, type SessionLifecycleMcpServer } from "../../sdk/acp/mcp";
 import { ensureBroker } from "../../sdk/broker/ensure";
 import { readSdkBrokerDiscovery, SdkClient, SdkClientError } from "../../sdk/client";
+import { getSkcWorkflowPublicName, resolveSkcWorkflowId } from "../../skill-state/canonical-skills";
 import {
 	buildToolCallStartUpdate,
 	mapAgentSessionEventToAcpSessionUpdates,
@@ -224,7 +225,9 @@ export function acpAvailableCommandsFromSkills(query: unknown): AvailableCommand
 	for (const item of pageItems(query)) {
 		const skill = object(item);
 		if (typeof skill?.name !== "string" || !skill.name) continue;
-		const name = `skill:${skill.name}`;
+		const workflowId = resolveSkcWorkflowId(skill.name);
+		if (workflowId && workflowId !== skill.name) continue;
+		const name = `skill:${getSkcWorkflowPublicName(skill.name)}`;
 		if (commands.has(name)) continue;
 		commands.set(name, {
 			name,

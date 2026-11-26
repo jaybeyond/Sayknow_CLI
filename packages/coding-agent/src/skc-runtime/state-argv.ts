@@ -1,4 +1,4 @@
-import { CANONICAL_SKC_WORKFLOW_SKILLS, type CanonicalSkcWorkflowSkill } from "../skill-state/canonical-skills";
+import { CANONICAL_SKC_WORKFLOW_SKILLS, resolveSkcWorkflowId } from "../skill-state/canonical-skills";
 import { typedArgsFor } from "./workflow-manifest";
 
 export type StateAction =
@@ -99,7 +99,9 @@ function normalizedFlagName(arg: string): string | undefined {
 }
 
 function normalizedSelector(value: unknown): string | undefined {
-	return typeof value === "string" ? value.trim() || undefined : undefined;
+	if (typeof value !== "string") return undefined;
+	const name = value.trim();
+	return name ? (resolveSkcWorkflowId(name) ?? name) : undefined;
 }
 
 interface StatePositional {
@@ -155,10 +157,8 @@ function stateFlagArities(
 	for (const flag of STATE_FLAGS_WITH_VALUES) arities.set(flag, "value");
 	for (const flag of STATE_BOOLEAN_FLAGS) arities.set(flag, "boolean");
 
-	const skills =
-		positionalSkill && CANONICAL_SKC_WORKFLOW_SKILLS.includes(positionalSkill as CanonicalSkcWorkflowSkill)
-			? [positionalSkill as CanonicalSkcWorkflowSkill]
-			: CANONICAL_SKC_WORKFLOW_SKILLS;
+	const workflowId = positionalSkill ? resolveSkcWorkflowId(positionalSkill) : undefined;
+	const skills = workflowId ? [workflowId] : CANONICAL_SKC_WORKFLOW_SKILLS;
 	for (const skill of skills) {
 		for (const arg of typedArgsFor(skill, action)) {
 			const name = `--${arg.name}`;

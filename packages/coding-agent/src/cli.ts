@@ -18,6 +18,7 @@ import {
 	runManagedOwnerSupervisor,
 } from "./skc-runtime/managed-owner-supervisor";
 import { isTmuxOwnerIsolationCliArgv, runTmuxOwnerIsolationCliFromStdin } from "./skc-runtime/tmux-owner-isolation-cli";
+import { SKC_WORKFLOW_PUBLIC_NAMES } from "./skill-state/canonical-skills";
 import { smokeTestTabWorker } from "./tools/browser/tab-worker-smoke";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
@@ -43,10 +44,22 @@ export const commands: CommandEntry[] = [
 	{ name: "session", load: () => import("./commands/session").then(m => m.default) },
 	{ name: "harness", load: () => import("./commands/harness").then(m => m.default) },
 	{ name: "coordinator", load: () => import("./commands/coordinator").then(m => m.default) },
-	{ name: "team", load: () => import("./commands/team").then(m => m.default) },
-	{ name: "ultragoal", load: () => import("./commands/ultragoal").then(m => m.default) },
+	{
+		name: SKC_WORKFLOW_PUBLIC_NAMES.team,
+		aliases: ["team"],
+		load: () => import("./commands/team").then(m => m.default),
+	},
+	{
+		name: SKC_WORKFLOW_PUBLIC_NAMES.ultragoal,
+		aliases: ["ultragoal"],
+		load: () => import("./commands/ultragoal").then(m => m.default),
+	},
 	{ name: "gc", load: () => import("./commands/gc").then(m => m.default) },
-	{ name: "ralplan", load: () => import("./commands/ralplan").then(m => m.default) },
+	{
+		name: SKC_WORKFLOW_PUBLIC_NAMES.ralplan,
+		aliases: ["ralplan"],
+		load: () => import("./commands/ralplan").then(m => m.default),
+	},
 	{ name: "config", load: () => import("./commands/config").then(m => m.default) },
 	{ name: "stats", load: () => import("./commands/stats").then(m => m.default) },
 	{ name: "notify", load: () => import("./commands/notify").then(m => m.default) },
@@ -61,7 +74,11 @@ export const commands: CommandEntry[] = [
 		aliases: ["contribution-prep"],
 		load: () => import("./commands/contribution-prep").then(m => m.default),
 	},
-	{ name: "deep-interview", load: () => import("./commands/deep-interview").then(m => m.default) },
+	{
+		name: SKC_WORKFLOW_PUBLIC_NAMES["deep-interview"],
+		aliases: ["deep-interview"],
+		load: () => import("./commands/deep-interview").then(m => m.default),
+	},
 	{ name: "migrate", load: () => import("./commands/migrate").then(m => m.default) },
 	{ name: "rlm", load: () => import("./commands/rlm").then(m => m.default) },
 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },

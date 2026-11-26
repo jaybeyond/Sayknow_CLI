@@ -1605,6 +1605,13 @@
         "appliesToVerbs": [
           "create-goals"
         ],
+        "name": "batch-json",
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "create-goals"
+        ],
         "name": "validation-batch-json",
         "type": "string"
       },
@@ -1893,6 +1900,27 @@
           "review"
         ],
         "name": "spec",
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "review"
+        ],
+        "name": "verify-json",
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "review"
+        ],
+        "name": "verify",
+        "type": "string"
+      },
+      {
+        "appliesToVerbs": [
+          "review"
+        ],
+        "name": "executor-qa",
         "type": "string"
       },
       {

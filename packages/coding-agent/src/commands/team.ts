@@ -75,7 +75,7 @@ function parseInputFlag(argv: string[]): Record<string, unknown> {
 
 export default class Team extends Command {
 	static description =
-		"Run native SKC tmux team orchestration from inside an existing tmux/SKC --tmux session; --dry-run writes ephemeral .skc/_session-{sessionid}/state/team state only";
+		"Run Octo, SKC's tmux team workflow, from an existing tmux/SKC --tmux session; --dry-run writes ephemeral .skc/_session-{sessionid}/state/team state only";
 	static strict = false;
 
 	static args = {
@@ -96,12 +96,12 @@ export default class Team extends Command {
 
 	static examples = [
 		"skc --tmux  # start the required tmux-backed leader session first",
-		'skc team 3:executor "Implement the approved plan"',
-		"skc team status <team-name> --json",
-		"skc team monitor <team-name> --json",
-		'skc team api claim-task --input \'{"team_name":"demo","worker_id":"worker-1"}\' --json',
-		'skc team 2:executor --dry-run --json "Preview state only"',
-		"skc team shutdown <team-name>",
+		'skc octo 3:executor "Implement the approved plan"',
+		"skc octo status <team-name> --json",
+		"skc octo monitor <team-name> --json",
+		'skc octo api claim-task --input \'{"team_name":"demo","worker_id":"worker-1"}\' --json',
+		'skc octo 2:executor --dry-run --json "Preview state only"',
+		"skc octo shutdown <team-name>",
 	];
 
 	async run(): Promise<void> {
@@ -130,7 +130,7 @@ export default class Team extends Command {
 			}
 			writeText([
 				renderTeamStatusMarkdown(snapshot).trimEnd(),
-				"- mode: read-only status; use `skc team monitor <team>` or `skc team resume <team>` for recovery/integration",
+				"- mode: read-only status; use `skc octo monitor <team>` or `skc octo resume <team>` for recovery/integration",
 			]);
 			void formatTaskCounts(snapshot.task_counts);
 			return;

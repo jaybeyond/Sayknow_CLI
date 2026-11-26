@@ -514,7 +514,7 @@ test("production ACP preserves lifecycle, turn, replay, and connection ownership
 	const availableCommands = updates.find(update => update.update.sessionUpdate === "available_commands_update")
 		?.update as { availableCommands?: Array<{ name: string }> };
 	expect(availableCommands.availableCommands?.map(command => command.name)).toEqual(
-		expect.arrayContaining(["skill:deep-interview", "skill:ralplan", "skill:ultragoal", "skill:team"]),
+		expect.arrayContaining(["skill:sonar", "skill:blueprint", "skill:voyage", "skill:octo"]),
 	);
 	const listedOwned = await bounded(agent.listSessions({ cwd }), "list owned session");
 	expect(listedOwned.sessions).toEqual([

@@ -13,6 +13,7 @@ import {
 	readVisibleSkillActiveState,
 	syncSkillActiveState,
 } from "../skill-state/active-state";
+import { resolveSkcWorkflowId } from "../skill-state/canonical-skills";
 import { initialPhaseForSkill } from "../skill-state/initial-phase";
 import {
 	buildRalplanHudSummary,
@@ -37,6 +38,7 @@ import {
 	assertDeepInterviewIntentManifest,
 	assertDeepInterviewIntentReview,
 	assertDeepInterviewStructuredResponseWithinLimit,
+	assertNoDeepInterviewKeyAliasConflict,
 	type DeepInterviewIntentManifest,
 	MAX_DEEP_INTERVIEW_STRUCTURED_RESPONSE_LENGTH,
 	mergeDeepInterviewEnvelope,
@@ -176,7 +178,7 @@ async function resolveSelectors(args: readonly string[], cwd: string, action: St
 	let mode: string | undefined;
 	for (const candidate of candidates) {
 		if (candidate) {
-			mode = candidate;
+			mode = resolveSkcWorkflowId(candidate) ?? candidate;
 			break;
 		}
 	}
@@ -627,7 +629,8 @@ async function handleDoctor(
 	cwd: string,
 	positionalSkill: string | undefined,
 ): Promise<StateCommandResult> {
-	const rawSkill = flagValue(args, "--skill")?.trim() || flagValue(args, "--mode")?.trim() || positionalSkill?.trim();
+	const requested = flagValue(args, "--skill")?.trim() || flagValue(args, "--mode")?.trim() || positionalSkill?.trim();
+	const rawSkill = requested ? (resolveSkcWorkflowId(requested) ?? requested) : undefined;
 	if (rawSkill) assertKnownMode(rawSkill);
 	const payload = await readInputJson(flagValue(args, "--input"), cwd);
 	const session = await resolveSkcSessionForRead(cwd, {
@@ -1018,7 +1021,14 @@ async function reconcileWorkflowSkillStateUnlocked(
 ): Promise<{ stateFile: string }> {
 	const { cwd, mode, threadId, turnId, active, payload } = options;
 	const filePath = modeStateFile(cwd, mode, sessionId);
-	if (mode === "deep-interview") assertDeepInterviewStructuredResponseWithinLimit(payload);
+	if (mode === "deep-interview") {
+		try {
+			assertDeepInterviewStructuredResponseWithinLimit(payload);
+			assertNoDeepInterviewKeyAliasConflict(payload);
+		} catch (error) {
+			throw new StateCommandError(2, error instanceof Error ? error.message : String(error));
+		}
+	}
 	const existingRead = await readExistingStateForMutation(filePath);
 	const existingPayload = existingRead.kind === "valid" ? existingRead.value : {};
 	const nowIsoStr = nowIso();
@@ -1222,6 +1232,7 @@ async function handleWrite(args: readonly string[], cwd: string): Promise<StateC
 	if (mode === "deep-interview") {
 		try {
 			assertDeepInterviewStructuredResponseWithinLimit(payload);
+			assertNoDeepInterviewKeyAliasConflict(payload);
 		} catch (error) {
 			throw new StateCommandError(2, error instanceof Error ? error.message : String(error));
 		}
@@ -1563,7 +1574,7 @@ async function handleHandoffUnlocked(args: readonly string[], cwd: string): Prom
 		throw new StateCommandError(2, "skc state handoff requires --to <callee>");
 	}
 	assertSafePathComponent(calleeRaw, "to");
-	const callee = calleeRaw;
+	const callee = resolveSkcWorkflowId(calleeRaw) ?? calleeRaw;
 	const calleeIsWorkflow = isKnownMode(callee);
 	if (callee === caller) {
 		throw new StateCommandError(2, `skc state handoff: --to must differ from caller (both are "${caller}")`);
@@ -2035,8 +2046,9 @@ async function buildGcSummary(
 	positionalSkill: string | undefined,
 	dryRun: boolean,
 ): Promise<GcSummary> {
-	const rawSkill =
+	const requested =
 		flagValue(args, "--skill")?.trim() || flagValue(args, "--mode")?.trim() || positionalSkill?.trim() || "all";
+	const rawSkill = resolveSkcWorkflowId(requested) ?? requested;
 	if (rawSkill !== "all") assertKnownMode(rawSkill);
 	const skills = rawSkill === "all" ? CANONICAL_SKC_WORKFLOW_SKILLS : [rawSkill as CanonicalSkcWorkflowSkill];
 	const session = await resolveSkcSessionForRead(cwd, {
@@ -2090,7 +2102,9 @@ async function handleGraph(
 			stdout: hasFlag(args, "--json") ? `${JSON.stringify(history, null, 2)}\n` : renderHistoryMarkdown(history),
 		};
 	}
-	const rawSkill = flagValue(args, "--skill")?.trim() || positionalSkill?.trim() || "all";
+	const requested =
+		flagValue(args, "--skill")?.trim() || flagValue(args, "--mode")?.trim() || positionalSkill?.trim() || "all";
+	const rawSkill = resolveSkcWorkflowId(requested) ?? requested;
 	if (rawSkill !== "all") assertKnownMode(rawSkill);
 	const format = flagValue(args, "--format")?.trim() || "ascii";
 	if (!GRAPH_FORMATS.has(format)) {

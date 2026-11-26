@@ -66,7 +66,7 @@ import {
 	type StrictSessionOpenResult,
 } from "./session/session-manager";
 import { runStartupCredentialAutoImportIfNeeded } from "./setup/credential-auto-import";
-import { formatModelOnboardingGuidance } from "./setup/model-onboarding-guidance";
+import { formatModelOnboardingGuidance, formatNoModelsAvailableFallback } from "./setup/model-onboarding-guidance";
 import { admitManagedOwnerBeforeCli, completeManagedOwnerRecovery } from "./skc-runtime/managed-owner-admission";
 import { isManagedOwnerSupervisorArgv, runManagedOwnerSupervisor } from "./skc-runtime/managed-owner-supervisor";
 import { persistCoordinatorRuntimeInputReady } from "./skc-runtime/session-state-sidecar";
@@ -1605,7 +1605,11 @@ export async function runRootCommand(
 			}
 		}
 
-		if (modelFallbackMessage) {
+		const welcomeShowsModelAction = isInteractive && !settingsInstance.get("startup.quiet") && !session.model;
+		if (
+			modelFallbackMessage &&
+			!(welcomeShowsModelAction && modelFallbackMessage === formatNoModelsAvailableFallback())
+		) {
 			notifs.push({ kind: "warn", message: modelFallbackMessage });
 		}
 
@@ -1617,7 +1621,7 @@ export async function runRootCommand(
 			notifs.push({ kind: "info", message: credentialAutoImportNotice });
 		}
 
-		if (isInteractive && !session.model && !modelFallbackMessage) {
+		if (isInteractive && !welcomeShowsModelAction && !session.model && !modelFallbackMessage) {
 			notifs.push({
 				kind: "info",
 				message: `No usable model is configured yet. ${formatModelOnboardingGuidance()}`,

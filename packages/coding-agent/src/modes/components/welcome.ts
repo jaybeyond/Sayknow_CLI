@@ -26,6 +26,7 @@ export interface WelcomeComponentOptions {
 	resumeKey?: string;
 	/** Key bound to `app.session.continue`, which resumes the first session on the card. */
 	continueKey?: string;
+	modelKey?: string | null;
 	/** Called when a session row is opened by click or Enter. */
 	onOpenSession?: (session: RecentSession) => void;
 	/**
@@ -276,8 +277,7 @@ export class WelcomeComponent implements Component {
 
 	#sections(cardWidth: number): { identity: string[]; others: Section[] } {
 		const others: Section[] = [];
-		const sessions = this.#sessionSection(cardWidth);
-		others.push({ ...sessions, dropRank: 1 });
+		if (this.recentSessions.length > 0) others.push({ ...this.#sessionSection(cardWidth), dropRank: 1 });
 		const note = this.#releaseNoteLine(cardWidth);
 		if (note) others.push({ lines: [note], dropRank: 2 });
 		others.push({ lines: [this.#keysLine(cardWidth)], dropRank: 3 });
@@ -309,8 +309,7 @@ export class WelcomeComponent implements Component {
 
 	#chooseModelPart(width: number): string {
 		const label = theme.fg("accent", t("welcome.chooseModel"));
-		const context = this.options.keyDisplayContext ?? { platform: process.platform };
-		const hint = `${label}${theme.fg("dim", ` · ${formatKeyHint("ctrl+l", context)}`)}`;
+		const hint = `${label}${theme.fg("dim", ` · ${this.#modelKey()}`)}`;
 		return visibleWidth(hint) <= width ? hint : this.#truncate(label, width);
 	}
 
@@ -344,9 +343,6 @@ export class WelcomeComponent implements Component {
 
 	#sessionSection(width: number): Pick<Section, "lines" | "sessionRows"> {
 		const heading = theme.bold(theme.fg("accent", t("welcome.sessionTrail")));
-		if (this.recentSessions.length === 0) {
-			return { lines: [this.#sessionHeading(heading, [], width), `  ${theme.fg("dim", t("welcome.noSessions"))}`] };
-		}
 		const context = this.options.keyDisplayContext ?? { platform: process.platform };
 		const picking = this.#selected !== undefined;
 		const hints = picking
@@ -395,16 +391,20 @@ export class WelcomeComponent implements Component {
 	}
 
 	#keysLine(width: number): string {
-		const context = this.options.keyDisplayContext ?? { platform: process.platform };
 		const items: ReadonlyArray<{ key: string; label: MsgKey }> = [
 			{ key: "/", label: "welcome.commands" },
-			{ key: formatKeyHint("ctrl+l", context), label: "welcome.model" },
+			...(this.#hasModel() ? [{ key: this.#modelKey(), label: "welcome.model" as const }] : []),
 			{ key: "?", label: "welcome.keymap" },
 		];
 		const labels = items.map(item => `${theme.fg("accent", item.key)} ${theme.fg("dim", t(item.label))}`);
 		const separator = theme.fg("borderMuted", "  ·  ");
 		while (labels.length > 0 && visibleWidth(labels.join(separator)) > width) labels.pop();
 		return labels.join(separator);
+	}
+
+	#modelKey(): string {
+		const context = this.options.keyDisplayContext ?? { platform: process.platform };
+		return this.options.modelKey === null ? "/model" : formatKeyHint(this.options.modelKey ?? "ctrl+l", context);
 	}
 
 	/**

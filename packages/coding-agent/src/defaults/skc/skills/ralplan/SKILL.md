@@ -1,20 +1,20 @@
 ---
 name: ralplan
-description: Consensus planning entrypoint that auto-gates vague team/ultragoal requests before execution
+description: Blueprint consensus planning and approval before execution
 argument-hint: "[--interactive] [--deliberate] [--architect openai-code] [--critic openai-code] <task description>"
 level: 4
 
 source: "forked from upstream ralplan skill and rebranded for SKC"
 ---
 
-# Ralplan (Consensus Planning Alias)
+# Blueprint: Consensus Planning
 
-Ralplan is the consensus planning workflow. It triggers iterative planning with Planner, Architect, and Critic agents until consensus is reached, with **RALPLAN-DR structured deliberation** (short mode by default, deliberate mode for high-risk work).
+Blueprint is the consensus planning workflow. It triggers iterative planning with Planner, Architect, and Critic agents until consensus is reached, with **RALPLAN-DR structured deliberation** (short mode by default, deliberate mode for high-risk work).
 
 ## Usage
 
 ```
-/skill:ralplan "task description"
+/skill:blueprint "task description"
 ```
 
 ## Flags
@@ -28,9 +28,27 @@ Ralplan is the consensus planning workflow. It triggers iterative planning with 
 ## Usage with interactive mode
 
 ```
-/skill:ralplan --interactive "task description"
+/skill:blueprint --interactive "task description"
 ```
 
+<!-- skc:cmdref:start state -->
+### Generated command reference: state
+
+After explicit execution approval, a finalized Blueprint can hand off directly to Octo or Voyage. Do not rewrite the final phase first.
+
+Commands:
+- `skc state blueprint handoff --to <octo|voyage> --json`
+  - Bridge command run in-process by the skill tool after slash-skill dispatch.
+
+Examples:
+- check final plan state:
+```
+skc state blueprint read --json
+```
+
+Aliases and bridges:
+- blueprint -> octo|voyage: `skc state blueprint handoff --to <octo|voyage> --json`
+<!-- skc:cmdref:end state -->
 ## Corrupt current-session state recovery
 
 When ralplan detects its own current-session state is corrupt, tampered, unreadable, or stale on resume, run `skc state clear --force --mode ralplan` before reseeding or restarting. Scope the clear to the current session via `--session-id`, the command payload, or `SKC_SESSION_ID`; it clears only ralplan state for that session and never clears other skills or sessions.
@@ -114,15 +132,9 @@ The consensus workflow:
    - **Stop here** — keep the plan as `pending approval` and make no further changes
 
    Always include a free-text option. Do not stop with plain text and no `ask`; the post-interview gate's terminal action is this `ask`.
-9. On approval: invoke `/skill:ultragoal` for execution by default; invoke `/skill:team` only when the user explicitly needs tmux-based interactive worker parallelization. On **Refine further**, return to the step 5 re-review loop. On **Stop here**, leave the `pending approval` artifact and stop. Never implement directly.
+9. On approval: hand off to Voyage by default or to Octo only when the user explicitly needs tmux-based interactive worker parallelization. On **Refine further**, return to the step 5 re-review loop. On **Stop here**, leave the `pending approval` artifact and stop. Never implement directly.
 
-   Before invoking `/skill:team` or `/skill:ultragoal`, mark ralplan ready for handoff so the skill tool's chain guard permits the transition:
-
-   ```
-   skc state ralplan write --input '{"current_phase":"handoff"}' --json
-   ```
-
-   The skill tool then dispatches the execution skill same-turn and runs `skc state ralplan handoff --to <team|ultragoal> --json` in-process to atomically demote ralplan, promote the callee, and sync `.skc/_session-{sessionid}/state/skill-active-state.json`. You do not need to run the handoff verb yourself.
+   When the state is `final`, use the generated `skc state blueprint handoff` command above with the approved destination. This atomically demotes Blueprint and activates the destination without a separate phase write. Read the destination's instructions with `skc skills read voyage` or `skc skills read octo` and follow them without invoking the already-active destination recursively. Restricted review roles still use `skc ralplan --write` to persist review artifacts.
 
 > **Important:** Architect and Critic MAY run in the same parallel batch only for the plan-only Critic lane after Planner persistence (review pass 1). Pass 2+ re-reviews MUST run sequentially Architect -> Critic: await Architect before issuing Critic, pass the current-pass Architect receipt/path to Critic for the rule-5 counter-review, then apply the same review join gate before consensus.
 

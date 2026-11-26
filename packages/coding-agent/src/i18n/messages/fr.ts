@@ -25,6 +25,7 @@ export const fr: Partial<Record<MsgKey, string>> = {
 	"composer.steer": "Orienter",
 	"composer.queue": "File",
 	"composer.newLine": "Nouvelle ligne",
+	"tools.expandHint": "Développer",
 	"settings.title": "Réglages",
 	"settings.preview": "Aperçu :",
 	"settings.tabCycle": "Tab pour changer",

@@ -52,13 +52,14 @@ describe("workflow command-reference proof spike", () => {
 		const second = renderCommandRefBlock("ralplan");
 		expect(first).toEqual(second);
 		expect(first.bytes).toContain("<!-- skc:cmdref:start state -->");
-		expect(first.bytes).toContain("skc state ralplan write --input");
+		expect(first.bytes).toContain("skc state blueprint handoff --to <octo|voyage>");
+		expect(first.bytes).not.toContain("skc state blueprint write");
 		expect(first.bytes.endsWith("\n")).toBe(true);
 	});
 
-	it("reports byte-equal or gap status without mutating SKILL.md files", async () => {
+	it("strictly checks generated blocks without mutating SKILL.md files", async () => {
 		const before = await snapshotSkillFiles();
-		const result = await runBun(["scripts/generate-skc-skill-command-refs.ts", "--check", "--json"]);
+		const result = await runBun(["scripts/generate-skc-skill-command-refs.ts", "--check", "--strict", "--json"]);
 		await expectSkillFilesUnchanged(before);
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr).toBe("");
@@ -69,11 +70,8 @@ describe("workflow command-reference proof spike", () => {
 		for (const item of parsed.results) {
 			expect([...CANONICAL_SKC_WORKFLOW_SKILLS] as string[]).toContain(item.skill);
 			expect(item.blockId).toBe("state");
-			expect(["BYTE-EQUAL", "GAP"]).toContain(item.status);
+			expect(item.status).toBe("BYTE-EQUAL");
 		}
-		expect(
-			parsed.results.every(item => item.status === "GAP" && item.reason === "unmarked / not yet generated"),
-		).toBe(true);
 	});
 
 	it("prints per-skill token budget report", async () => {
