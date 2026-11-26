@@ -388,10 +388,10 @@ describe("skill slash command resolution", () => {
 		if (!deepInterview) throw new Error("expected embedded deep-interview skill");
 
 		const withFileCollision = resolveSkillSlashCommands([deepInterview], new Set(["deep-interview"]));
-		expect(withFileCollision.map(command => command.name)).toEqual(["skill:deep-interview"]);
+		expect(withFileCollision.map(command => command.name)).toEqual(["skill:sonar"]);
 
 		const afterCollisionRemoved = resolveSkillSlashCommands([deepInterview], new Set());
-		expect(afterCollisionRemoved.map(command => command.name)).toEqual(["skill:deep-interview"]);
+		expect(afterCollisionRemoved.map(command => command.name)).toEqual(["skill:sonar"]);
 		expect(afterCollisionRemoved.every(command => command.skill === deepInterview)).toBe(true);
 	});
 });

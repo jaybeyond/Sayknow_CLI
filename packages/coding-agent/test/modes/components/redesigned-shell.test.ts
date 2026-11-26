@@ -242,7 +242,7 @@ describe("redesigned interactive shell chrome", () => {
 		const bashRendered = Bun.stripANSI(bash.render(80).join("\n"));
 
 		expect(bashRendered).toContain("shell · $ printf");
-		expect(bashRendered).toContain("ctrl+o to expand");
+		expect(bashRendered).toMatch(/(?:⌃O|Ctrl\+O) Expand/);
 		expect(bashRendered).not.toContain("line-0\n");
 		for (const line of bash.render(80)) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(80);
@@ -264,9 +264,13 @@ describe("redesigned interactive shell chrome", () => {
 
 			expect(lines.join("")).not.toMatch(/\x1b\[48;/);
 			for (const boxGlyph of ["┌", "┐", "└", "┘", "╭", "╯"]) expect(plain.join("\n")).not.toContain(boxGlyph);
-			expect(body[0]).toContain("Bash");
-			expect(body.slice(1).every(line => /^\s[│├]/.test(line))).toBe(true);
-			expect(plain.join("\n")).toContain("fatal: no remote");
+			if (isError) {
+				expect(body[0]).toContain("Bash");
+				expect(body.slice(1).join("\n")).toMatch(/^\s[│├].*fatal: no remote/m);
+			} else {
+				expect(body).toHaveLength(1);
+				expect(body[0]).toMatch(/bash.*fatal: no remote/);
+			}
 			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(60);
 		}
 		// The rail, not a fill, carries the error state.
@@ -322,14 +326,14 @@ describe("redesigned interactive shell chrome", () => {
 		expect(STATUS_LINE_PRESETS.nerd.leftSegments).toContain("sayknow");
 	});
 
-	it("keeps the default status preset dense and pulse-forward", () => {
-		expect(STATUS_LINE_PRESETS.default.leftSegments).toEqual(["model", "mode", "git", "pr", "path"]);
-		expect(STATUS_LINE_PRESETS.default.rightSegments).toEqual(["session_name", "jobs", "token_rate", "cost"]);
+	it("prioritizes model and workspace in the default status preset", () => {
+		expect(STATUS_LINE_PRESETS.default.leftSegments).toEqual(["model", "path", "mode", "git", "pr"]);
+		expect(STATUS_LINE_PRESETS.default.rightSegments).toEqual(["session_name", "jobs"]);
 		expect(STATUS_LINE_PRESETS.default.segmentOptions?.path?.maxLength).toBe(32);
 	});
 
-	it("adds a default plus usage status preset without changing default", () => {
-		expect(STATUS_LINE_PRESETS["default-usage"].leftSegments).toEqual(STATUS_LINE_PRESETS.default.leftSegments);
+	it("keeps an opt-in status preset with token rate, usage, and cost", () => {
+		expect(STATUS_LINE_PRESETS["default-usage"].leftSegments).toEqual(["model", "mode", "git", "pr", "path"]);
 		expect(STATUS_LINE_PRESETS["default-usage"].rightSegments).toEqual([
 			"session_name",
 			"jobs",

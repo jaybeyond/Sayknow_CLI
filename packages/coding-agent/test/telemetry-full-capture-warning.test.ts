@@ -1,11 +1,18 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetContentCaptureEnvCacheForTest, resolveTelemetry } from "@sayknow-cli/agent-core/telemetry";
 
 describe("full content capture env warning", () => {
 	const envName = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT";
+	let originalValue: string | undefined;
+
+	beforeEach(() => {
+		originalValue = process.env[envName];
+		resetContentCaptureEnvCacheForTest();
+	});
 
 	afterEach(() => {
-		delete process.env[envName];
+		if (originalValue === undefined) delete process.env[envName];
+		else process.env[envName] = originalValue;
 		resetContentCaptureEnvCacheForTest();
 		vi.restoreAllMocks();
 	});

@@ -118,14 +118,16 @@ describe("Claude Opus 5.5 provider coverage", () => {
 		expect(opus5Providers.filter(provider => !opus55Providers.has(provider))).toEqual([]);
 	});
 
-	test("Bedrock bundles Opus 5.5 in every region it bundles Opus 5 in", () => {
+	test("Bedrock bundles Opus 5.5 in Opus 5 regions except the India-only Opus 5 profile", () => {
 		const regionsFor = (generation: number): string[] =>
 			getBundledModels("amazon-bedrock")
 				.filter(model => claudeOpusGeneration(model.id) === generation)
 				.map(model => model.id.replace(/anthropic\.claude-opus-5(-5)?$/, "anthropic"))
 				.sort();
 
-		expect(regionsFor(5).length).toBeGreaterThan(1);
-		expect(regionsFor(5.5)).toEqual(regionsFor(5));
+		const opus5Regions = regionsFor(5);
+		expect(opus5Regions.length).toBeGreaterThan(1);
+		expect(opus5Regions).toContain("in.anthropic");
+		expect(regionsFor(5.5)).toEqual(opus5Regions.filter(region => region !== "in.anthropic"));
 	});
 });

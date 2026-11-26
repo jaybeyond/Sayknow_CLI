@@ -18,12 +18,12 @@ describe("prompt.format renderPhase", () => {
 		expect(output).toBe(input);
 	});
 
-	test("pre-render trims trailing whitespace", () => {
+	test("pre-render trims trailing spaces without removing tabs", () => {
 		const input = "\t<root>   \n\t  {{#if ok}}\t\n\t    value   \n\t  {{/if}} \n</root>";
 
 		const output = prompt.format(input, { renderPhase: "pre-render" });
 
-		expect(output).toBe("\t<root>\n\t  {{#if ok}}\n\t    value\n\t  {{/if}}\n</root>");
+		expect(output).toBe("\t<root>\n\t  {{#if ok}}\t\n\t    value\n\t  {{/if}}\n</root>");
 	});
 
 	test("post-render mode preserves indentation on Handlebars-like lines", () => {

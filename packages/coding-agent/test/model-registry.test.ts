@@ -568,7 +568,7 @@ describe("ModelRegistry", () => {
 			).toBe(true);
 			expect(
 				registry
-					.getCanonicalVariants("gemini-pro")
+					.getCanonicalVariants("gemini-pro-latest")
 					.some(variant => variant.selector === "demo/google/gemini-pro-latest"),
 			).toBe(true);
 		});

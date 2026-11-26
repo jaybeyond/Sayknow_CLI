@@ -77,7 +77,7 @@ describe("workflow intent report consumer", () => {
 			escalationGate: {
 				required: true,
 				count: 2,
-				latestReason: "/skill:ralplan --deliberate",
+				latestReason: "/skill:blueprint --deliberate",
 			},
 			rootCausePhase: {
 				active: true,

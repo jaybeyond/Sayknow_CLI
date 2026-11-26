@@ -6,6 +6,8 @@ import { lifecyclePaths } from "@sayknow-cli/coding-agent/skc-runtime/tmux-owner
 import { interactiveBootstrapText, routeRootArgv } from "../src/cli";
 import { parseArgs } from "../src/cli/args";
 
+import { SKC_WORKFLOW_PUBLIC_NAMES } from "../src/skill-state/canonical-skills";
+
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
 
@@ -16,7 +18,12 @@ async function readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
 function extractRegisteredCommands(source: string): string[] {
 	const commandsBlock = source.match(/const commands: CommandEntry\[\] = \[([\s\S]*?)\];/);
 	if (!commandsBlock) return [];
-	return [...commandsBlock[1].matchAll(/\bname:\s*"([^"]+)"/g)].map(match => match[1]);
+	return [
+		...commandsBlock[1].matchAll(/\bname:\s*(?:"([^"]+)"|SKC_WORKFLOW_PUBLIC_NAMES(?:\.(\w+)|\["([^"]+)"\]))/g),
+	].map(
+		([, literal, property, index]) =>
+			literal ?? SKC_WORKFLOW_PUBLIC_NAMES[(property ?? index) as keyof typeof SKC_WORKFLOW_PUBLIC_NAMES],
+	);
 }
 
 describe("SKC public CLI command surface", () => {
@@ -146,10 +153,10 @@ process.exitCode = await child.exited;`;
 			"session",
 			"harness",
 			"coordinator",
-			"team",
-			"ultragoal",
+			"octo",
+			"voyage",
 			"gc",
-			"ralplan",
+			"blueprint",
 			"config",
 			"stats",
 			"notify",
@@ -160,7 +167,7 @@ process.exitCode = await child.exited;`;
 			"mcp-serve",
 			"mcp",
 			"contribute-pr",
-			"deep-interview",
+			"sonar",
 			"migrate",
 			"rlm",
 			"update",
