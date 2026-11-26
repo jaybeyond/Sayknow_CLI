@@ -451,23 +451,25 @@ describe("native release binary coverage", () => {
 		expect(workflow).toContain("pattern: pi-natives-${{ matrix.platform }}-${{ matrix.arch }}*");
 	});
 
-	test("tag publication builds natives + binaries then publishes npm and the GitHub Release", async () => {
+	test("tag publication consumes approved artifacts before publishing npm and the GitHub Release", async () => {
 		const workflow = await Bun.file(path.join(repoRoot, ".github/workflows/ci.yml")).text();
 		const native = workflowJob(workflow, "native");
 		const binaries = workflowJob(workflow, "binaries");
 		const publish = workflowJob(workflow, "publish");
 
-		// Native and binary builds also run in the tag rehearsal; publish remains tag-only.
+		// Build without publishing in the rehearsal; the tag consumes its artifacts.
 		for (const job of [native, binaries]) {
-			expect(job).toContain("if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
+			expect(job).toContain("if: ${{ github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify' }}");
 		}
 		expect(publish).toContain("if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') && github.event_name != 'workflow_dispatch' }}");
 		expect(workflow).not.toContain("release_source_verify");
 		expect(workflow).not.toContain("verify exact source SHA passed a successful main CI run");
 
-		// Binaries wait on natives; publish waits on both.
+		// Binaries wait on natives; the tag job reads both from the approved run.
 		expect(binaries).toContain("needs: [native]");
-		expect(publish).toContain("needs: [native, binaries]");
+		expect(publish.match(/run-id: \$\{\{ steps\.approval\.outputs\.run_id \}\}/g)).toHaveLength(2);
+		expect(publish.indexOf("Verify release approval")).toBeLessThan(publish.indexOf("Download all native addons"));
+		expect(publish).toContain("cancel-in-progress: false");
 
 		// Publish uses the proven evidence-based publish script in one job.
 		expect(publish).toContain("--prepare-evidence --evidence-dir");

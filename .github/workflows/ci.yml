@@ -230,7 +230,7 @@ jobs:
    # and cuts the GitHub Release; rehearsals stop after binary verification.
    # ---------------------------------------------------------------------------
    native:
-      if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify' }}
       timeout-minutes: 90
       runs-on: ${{ matrix.os }}
       strategy:
@@ -256,7 +256,7 @@ jobs:
               save_cache: "true"
 
    binaries:
-      if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify' }}
       needs: [native]
       timeout-minutes: 60
       runs-on: ${{ matrix.os }}
@@ -338,12 +338,15 @@ jobs:
 
    publish:
       if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') && github.event_name != 'workflow_dispatch' }}
-      needs: [native, binaries]
+      concurrency:
+         group: sayknow-production-release
+         cancel-in-progress: false
       # Registry/CDN visibility retries across all packages exceeded 45 minutes in 0.7.1.
       timeout-minutes: 90
       runs-on: ubuntu-22.04
       permissions:
          contents: write
+         actions: read
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
          - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
@@ -358,12 +361,38 @@ jobs:
               path: ~/.bun/install/cache
               key: bun-1.3.14-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
          - run: bun install --frozen-lockfile
+         - name: Verify release approval
+           id: approval
+           env:
+              GH_TOKEN: ${{ github.token }}
+              APPROVAL: ${{ vars.SKC_RELEASE_APPROVAL }}
+           shell: bash
+           run: |
+              set -euo pipefail
+              commit="$(git rev-parse HEAD)"
+              run_id="$(jq -er --arg commit "$commit" --arg tag "$GITHUB_REF_NAME" '
+                 select(.commit == $commit and .tag == $tag)
+                 | select(.binaries_sha256 | test("^[a-f0-9]{64}$"))
+                 | select(.packages_sha256 | test("^[a-f0-9]{64}$"))
+                 | [.platform_run, .full_run] | map(tostring)
+                 | select(length == 2 and all(.[]; test("^[0-9]+$")) and .[0] != .[1]) | @tsv
+              ' <<< "$APPROVAL")"
+              read -r platform_run full_run <<< "$run_id"
+              for approved_run in "$platform_run" "$full_run"; do
+                 gh run view "$approved_run" --json headSha,workflowName,event,conclusion |
+                    jq -e --arg commit "$commit" '.headSha == $commit and .workflowName == "CI" and .event == "workflow_dispatch" and .conclusion == "success"' > /dev/null
+              done
+              gh run view "$full_run" --json jobs |
+                 jq -e 'any(.jobs[]; .name == "check" and .conclusion == "success") and any(.jobs[]; .name == "test" and .conclusion == "success")' > /dev/null
+              printf 'run_id=%s\n' "$platform_run" >> "$GITHUB_OUTPUT"
          - name: Download all native addons
            uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
            with:
               pattern: pi-natives-*
               path: packages/natives/native
               merge-multiple: true
+              github-token: ${{ github.token }}
+              run-id: ${{ steps.approval.outputs.run_id }}
          - name: Prepare package release evidence
            shell: bash
            run: |
@@ -380,6 +409,8 @@ jobs:
               pattern: skc-binary-*
               path: release-binaries
               merge-multiple: true
+              github-token: ${{ github.token }}
+              run-id: ${{ steps.approval.outputs.run_id }}
          - name: Publish binary checksum manifest
            env:
               TAG_NAME: ${{ github.ref_name }}
@@ -389,6 +420,14 @@ jobs:
               package_version="$(bun -e 'console.log(require("./packages/coding-agent/package.json").version)')"
               test "$TAG_NAME" = "sayknow-v${package_version}"
               bun scripts/release-binaries-manifest.ts --bin-dir release-binaries --tag "$TAG_NAME"
+         - name: Verify approved artifact digests
+           env:
+              APPROVAL: ${{ vars.SKC_RELEASE_APPROVAL }}
+           shell: bash
+           run: |
+              set -euo pipefail
+              test "$(sha256sum release-binaries/sayknow-release-binaries.sha256 | cut -d ' ' -f 1)" = "$(jq -er .binaries_sha256 <<< "$APPROVAL")"
+              test "$(sha256sum release-evidence-assets/sayknow-release-packages-expected-v1.json | cut -d ' ' -f 1)" = "$(jq -er .packages_sha256 <<< "$APPROVAL")"
          - name: Stage GitHub Release draft
            uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
            with:

@@ -24,7 +24,7 @@ function jobSection(workflowText: string, jobName: string): string {
 }
 
 describe("stable release policy", () => {
-	test("tag releases build natives, then binaries, then publish npm + the GitHub Release", async () => {
+	test("tag releases publish only after matching approved rehearsal evidence", async () => {
 		const ci = await workflow();
 		expect(ci).toContain('tags: ["sayknow-v*"]');
 		expect(ci).not.toContain('tags: ["v*",');
@@ -33,9 +33,9 @@ describe("stable release policy", () => {
 		for (const position of positions) expect(position).toBeGreaterThanOrEqual(0);
 
 		expect(jobSection(ci, "binaries")).toContain("needs: [native]");
-		expect(jobSection(ci, "publish")).toContain("needs: [native, binaries]");
+		expect(jobSection(ci, "publish")).toContain("group: sayknow-production-release");
 		for (const stage of ["native", "binaries"]) {
-			expect(jobSection(ci, stage)).toContain("if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') || (github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify') }}");
+			expect(jobSection(ci, stage)).toContain("if: ${{ github.event_name == 'workflow_dispatch' && inputs.rehearsal == 'tag-build-verify' }}");
 		}
 		expect(jobSection(ci, "publish")).toContain("if: ${{ startsWith(github.ref, 'refs/tags/sayknow-v') && github.event_name != 'workflow_dispatch' }}");
 
@@ -46,6 +46,7 @@ describe("stable release policy", () => {
 		expect(publish).toContain("softprops/action-gh-release");
 		expect(publish).toContain("draft: true");
 		expect(publish).toContain('gh release edit "$GITHUB_REF_NAME" --draft=false');
+		expect(publish.indexOf("Verify approved artifact digests")).toBeLessThan(publish.indexOf("Stage GitHub Release draft"));
 		expect(publish.indexOf("Stage GitHub Release draft")).toBeLessThan(
 			publish.indexOf("Publish packages to npm"),
 		);
