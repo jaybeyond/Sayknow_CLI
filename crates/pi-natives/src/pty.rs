@@ -475,11 +475,12 @@ impl Drop for WindowsOpenptyAttempt {
 /// PTY child command.
 ///
 /// libmalloc turns stack logging on for any var with this prefix
-/// (`MallocStackLogging`, `MallocStackLoggingNoCompact`, `MallocStackLoggingLite`,
-/// `MallocStackLoggingDirectory`, ...), and PTY children always have a TTY
-/// stderr, so a contaminated parent would flood the terminal once per child.
-/// Applied after any caller-supplied env so explicit forwarding cannot
-/// reintroduce them. No-op off macOS (the vars are simply absent).
+/// (`MallocStackLogging`, `MallocStackLoggingNoCompact`,
+/// `MallocStackLoggingLite`, `MallocStackLoggingDirectory`, ...), and PTY
+/// children always have a TTY stderr, so a contaminated parent would flood the
+/// terminal once per child. Applied after any caller-supplied env so explicit
+/// forwarding cannot reintroduce them. No-op off macOS (the vars are simply
+/// absent).
 fn scrub_macos_malloc_stack_logging_env(cmd: &mut CommandBuilder) {
 	let names: Vec<String> = cmd
 		.iter_full_env_as_str()
@@ -974,7 +975,10 @@ mod tests {
 		let cmd = build_pty_command(&config);
 
 		for name in names {
-			assert!(cmd.get_env(name).is_none(), "{name} must be scrubbed even when explicitly forwarded");
+			assert!(
+				cmd.get_env(name).is_none(),
+				"{name} must be scrubbed even when explicitly forwarded"
+			);
 		}
 		assert_eq!(
 			cmd.get_env("KEEP_ME"),
