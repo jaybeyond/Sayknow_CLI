@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.28] - 2026-11-27
+
 ### Added
 
 - The agent now finds installed skills on its own. When a session has skills from a project `.skc/skills` directory, your user skills directory, or `skills.customDirectories`, the system prompt tells the agent to call `skill_discovery` with a domain word (`rust testing`, `bun`) before language-, framework-, testing-, or tooling-specific work and to load a skill that fits. Sessions with only bundled skills get no extra prompt text.

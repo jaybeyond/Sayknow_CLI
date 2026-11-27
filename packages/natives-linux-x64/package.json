@@ -1,6 +1,6 @@
 {
 	"name": "@sayknow-cli/natives-linux-x64",
-	"version": "0.7.27",
+	"version": "0.7.28",
 	"description": "Linux x64 native addons for @sayknow-cli/natives",
 	"type": "module",
 	"homepage": "https://sayknow-cli.com",
