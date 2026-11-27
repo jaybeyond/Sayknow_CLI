@@ -17,7 +17,7 @@ jobs:
       steps:
          - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
            with:
-              ref: bb92e23766958d22613574d9340fe8617c15133e
+              ref: 4facd750b88e804faad50d0825bc1be87311ada1
               persist-credentials: false
          - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
            with:
@@ -32,7 +32,7 @@ jobs:
               path: packages/natives/native
               merge-multiple: true
               github-token: ${{ github.token }}
-              run-id: 45775093080
+              run-id: 45919189448
          - run: bun scripts/ci-release-publish.ts --prepare-evidence --evidence-dir "$RUNNER_TEMP/release-evidence"
          - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
            with:
@@ -40,9 +40,9 @@ jobs:
               path: release-binaries
               merge-multiple: true
               github-token: ${{ github.token }}
-              run-id: 45775093080
+              run-id: 45919189448
          - run: |
-              bun scripts/release-binaries-manifest.ts --bin-dir release-binaries --tag sayknow-v0.7.27
+              bun scripts/release-binaries-manifest.ts --bin-dir release-binaries --tag sayknow-v0.7.28
               sha256sum release-binaries/sayknow-release-binaries.sha256 "$RUNNER_TEMP/release-evidence/sayknow-release-packages-expected-v1.json"
          - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
            with:
