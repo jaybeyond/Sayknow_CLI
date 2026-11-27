@@ -642,7 +642,9 @@ Project executor override body.
 		expect(routing).toContain(
 			"Before explicit execution approval, planning and interview workflows NEVER edit product source",
 		);
-		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(12);
+		expect(routing).toContain("{{#if runtimeSkillDiscovery}}");
+		expect(routing).toContain("call `skill_discovery` once with one or two domain words");
+		expect(routing.split("\n").filter(line => line.startsWith("-"))).toHaveLength(13);
 		expect(decomposition).toMatch(/skip it for one-step or obvious two-step fixes/i);
 	});
 

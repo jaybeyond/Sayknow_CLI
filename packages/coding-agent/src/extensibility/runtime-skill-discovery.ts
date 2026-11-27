@@ -8,6 +8,7 @@ import { BUNDLED_SKC_SECURITY_SKILL_NAMES } from "../defaults/skc-security-skill
 import { BUNDLED_SKC_UI_SKILL_NAMES } from "../defaults/skc-ui-skills";
 import { compareSkillOrder, SOURCE_PATHS, scanSkillsFromDir } from "../discovery/helpers";
 import { CANONICAL_SKC_WORKFLOW_SKILLS, SKC_WORKFLOW_PUBLIC_NAMES } from "../skill-state/canonical-skills";
+import { expandTilde } from "../tools/path-utils";
 import type { Skill } from "./skills";
 
 export type RuntimeSkillDiscoverySource = "project" | "user";
@@ -112,6 +113,17 @@ function sourceEnabled(source: RuntimeSkillDiscoverySource, policy: SkillsSettin
 	return false;
 }
 
+/**
+ * `skills.customDirectories` are an explicit user-level opt-in, so they are
+ * searched whenever filesystem skills are enabled, independent of the
+ * `enablePiUser` scan of the default home directories — the same rule
+ * `loadSkills()` applies when it builds the session skill list.
+ */
+function getCustomSkillDirs(policy: SkillsSettings | undefined, home: string): string[] {
+	if (policy?.enabled !== true) return [];
+	return (policy.customDirectories ?? []).map(dir => expandTilde(dir, home));
+}
+
 function matchesIncludePatterns(name: string, includeSkills: string[] | undefined): boolean {
 	if (!includeSkills || includeSkills.length === 0) return true;
 	return includeSkills.some(pattern => new Bun.Glob(pattern).match(name));
@@ -130,13 +142,75 @@ function isAllowedByPolicy(
 	skill: CapabilitySkill,
 	source: RuntimeSkillDiscoverySource,
 	policy: SkillsSettings | undefined,
+	configured: boolean,
 ): boolean {
 	if (BUILT_IN_SKILL_NAMES.has(skill.name)) return false;
-	if (!sourceEnabled(source, policy)) return false;
+	if (!configured && !sourceEnabled(source, policy)) return false;
 	if (isDisabledSkill(skill.name, policy?.disabledExtensions)) return false;
 	if (matchesIgnorePatterns(skill.name, policy?.ignoredSkills)) return false;
 	if (!matchesIncludePatterns(skill.name, policy?.includeSkills)) return false;
 	return true;
+}
+
+interface ScannedRuntimeSkill {
+	skill: CapabilitySkill;
+	source: RuntimeSkillDiscoverySource;
+	/** Found in a `skills.customDirectories` entry rather than a default scan. */
+	configured: boolean;
+}
+
+/**
+ * Scan every runtime skill location in precedence order: project directories
+ * nearest first, the default user directories, then configured custom
+ * directories. Callers keep the first entry per name.
+ */
+async function scanRuntimeSkillLocations(
+	cwd: string,
+	home: string,
+	source: RuntimeSkillDiscoverySource | "all",
+	policy: SkillsSettings | undefined,
+): Promise<ScannedRuntimeSkill[]> {
+	const scanJobs: Array<Promise<ScannedRuntimeSkill[]>> = [];
+	const projectSkills = await getProjectSkillDirs(cwd, home);
+	const projectContext = { cwd, home, repoRoot: projectSkills.repoRoot };
+	if ((source === "all" || source === "project") && sourceEnabled("project", policy)) {
+		for (const dir of projectSkills.dirs) {
+			scanJobs.push(
+				scanSkillsFromDir(projectContext, {
+					dir,
+					providerId: "runtime",
+					level: "project",
+					requireDescription: true,
+				}).then(result => result.items.map(skill => ({ skill, source: "project" as const, configured: false }))),
+			);
+		}
+	}
+	if (source === "all" || source === "user") {
+		const userContext = { cwd, home, repoRoot: home };
+		if (sourceEnabled("user", policy)) {
+			for (const dir of getUserSkillDirs(home)) {
+				scanJobs.push(
+					scanSkillsFromDir(userContext, {
+						dir,
+						providerId: "runtime",
+						level: "user",
+						requireDescription: true,
+					}).then(result => result.items.map(skill => ({ skill, source: "user" as const, configured: false }))),
+				);
+			}
+		}
+		for (const dir of getCustomSkillDirs(policy, home)) {
+			scanJobs.push(
+				scanSkillsFromDir(userContext, {
+					dir,
+					providerId: "runtime",
+					level: "user",
+					requireDescription: true,
+				}).then(result => result.items.map(skill => ({ skill, source: "user" as const, configured: true }))),
+			);
+		}
+	}
+	return (await Promise.all(scanJobs)).flat();
 }
 function matchesQuery(candidate: RuntimeSkillDiscoveryCandidate, query: string): boolean {
 	const normalized = query.trim().toLowerCase();
@@ -164,37 +238,11 @@ export async function discoverRuntimeSkills(
 	const home = options.home ?? getRuntimeHome();
 	const source = options.source ?? "all";
 	const policy = options.policy;
-	const scanJobs: Array<Promise<{ skill: CapabilitySkill; source: RuntimeSkillDiscoverySource }[]>> = [];
-	const projectSkills = await getProjectSkillDirs(options.cwd, home);
-	const projectContext = { cwd: options.cwd, home, repoRoot: projectSkills.repoRoot };
-	if ((source === "all" || source === "project") && sourceEnabled("project", policy)) {
-		for (const dir of projectSkills.dirs) {
-			scanJobs.push(
-				scanSkillsFromDir(projectContext, {
-					dir,
-					providerId: "runtime",
-					level: "project",
-					requireDescription: true,
-				}).then(result => result.items.map(skill => ({ skill, source: "project" as const }))),
-			);
-		}
-	}
-	if ((source === "all" || source === "user") && sourceEnabled("user", policy)) {
-		for (const dir of getUserSkillDirs(home)) {
-			scanJobs.push(
-				scanSkillsFromDir(
-					{ cwd: options.cwd, home, repoRoot: home },
-					{ dir, providerId: "runtime", level: "user", requireDescription: true },
-				).then(result => result.items.map(skill => ({ skill, source: "user" as const }))),
-			);
-		}
-	}
-
 	const seenNames = new Set<string>();
 	const seenPaths = new Set<string>();
 	const candidates: RuntimeSkillDiscoveryCandidate[] = [];
-	for (const entry of (await Promise.all(scanJobs)).flat()) {
-		if (!isAllowedByPolicy(entry.skill, entry.source, policy)) continue;
+	for (const entry of await scanRuntimeSkillLocations(options.cwd, home, source, policy)) {
+		if (!isAllowedByPolicy(entry.skill, entry.source, policy, entry.configured)) continue;
 		const realPath = await realPathOrSelf(entry.skill.path);
 		if (seenPaths.has(realPath) || seenNames.has(entry.skill.name)) continue;
 		seenPaths.add(realPath);
@@ -227,33 +275,8 @@ export async function findRuntimeSkillByName(
 ): Promise<Skill | undefined> {
 	const normalized = name.trim();
 	if (!normalized) return undefined;
-	const scanJobs: Array<Promise<{ skill: CapabilitySkill; source: RuntimeSkillDiscoverySource }[]>> = [];
-	const projectSkills = await getProjectSkillDirs(cwd, home);
-	const projectContext = { cwd, home, repoRoot: projectSkills.repoRoot };
-	if (sourceEnabled("project", policy)) {
-		scanJobs.push(
-			...projectSkills.dirs.map(dir =>
-				scanSkillsFromDir(projectContext, {
-					dir,
-					providerId: "runtime",
-					level: "project",
-					requireDescription: true,
-				}).then(result => result.items.map(skill => ({ skill, source: "project" as const }))),
-			),
-		);
-	}
-	if (sourceEnabled("user", policy)) {
-		for (const dir of getUserSkillDirs(home)) {
-			scanJobs.push(
-				scanSkillsFromDir(
-					{ cwd, home, repoRoot: home },
-					{ dir, providerId: "runtime", level: "user", requireDescription: true },
-				).then(result => result.items.map(skill => ({ skill, source: "user" as const }))),
-			);
-		}
-	}
-	for (const entry of (await Promise.all(scanJobs)).flat()) {
-		if (entry.skill.name === normalized && isAllowedByPolicy(entry.skill, entry.source, policy)) {
+	for (const entry of await scanRuntimeSkillLocations(cwd, home, "all", policy)) {
+		if (entry.skill.name === normalized && isAllowedByPolicy(entry.skill, entry.source, policy, entry.configured)) {
 			return toRuntimeSkill(entry.skill, entry.source);
 		}
 	}

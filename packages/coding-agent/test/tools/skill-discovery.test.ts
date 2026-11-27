@@ -234,6 +234,102 @@ describe("SkillDiscoveryTool", () => {
 		expect(sent).toHaveLength(0);
 	});
 
+	it("discovers and invokes skills from skills.customDirectories without the default user scan", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-custom-dir-cwd-"));
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "skc-custom-dir-home-"));
+		await makeSkill(path.join(home, "vendor-skills"), "rust-testing", "Rust testing patterns", "Custom body.");
+		await makeSkill(path.join(home, "vendor-skills"), "vendor-ignored", "Ignored vendor skill");
+		const originalHome = process.env.HOME;
+		process.env.HOME = home;
+		try {
+			const settings = runtimeSkillSettings({
+				"skills.enablePiUser": false,
+				"skills.customDirectories": ["~/vendor-skills"],
+				"skills.ignoredSkills": ["vendor-ignored"],
+			});
+			const discovery = await new SkillDiscoveryTool(createSession(cwd, { settings })).execute("call", {
+				query: "rust testing",
+			});
+			expect(discovery.details?.candidates).toEqual([
+				expect.objectContaining({ name: "rust-testing", description: "Rust testing patterns", source: "user" }),
+			]);
+			const all = await new SkillDiscoveryTool(createSession(cwd, { settings })).execute("call", {});
+			expect(all.details?.candidates.map(candidate => candidate.name)).not.toContain("vendor-ignored");
+
+			const sent: Array<{ content: string; details?: unknown }> = [];
+			const tool = new SkillTool(
+				createSession(cwd, {
+					skills: [],
+					settings,
+					sendCustomMessage: async message => {
+						sent.push({ content: String(message.content), details: message.details });
+					},
+				}),
+			);
+			await tool.execute("call", { name: "rust-testing" });
+			expect(sent).toHaveLength(1);
+			expect(sent[0]?.content).toContain("Custom body.");
+
+			const disabled = runtimeSkillSettings({
+				"skills.enabled": false,
+				"skills.customDirectories": ["~/vendor-skills"],
+			});
+			const blocked = await new SkillDiscoveryTool(createSession(cwd, { settings: disabled })).execute("call", {});
+			expect(blocked.details?.candidates).toEqual([]);
+		} finally {
+			if (originalHome === undefined) delete process.env.HOME;
+			else process.env.HOME = originalHome;
+		}
+	});
+
+	it("keeps a default user skill ahead of a custom-directory skill with the same name", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-custom-dir-precedence-cwd-"));
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "skc-custom-dir-precedence-home-"));
+		await makeSkill(path.join(home, ".skc", "agent", "skills"), "shared-helper", "User copy");
+		await makeSkill(path.join(home, "vendor-skills"), "shared-helper", "Vendor copy");
+		const originalHome = process.env.HOME;
+		process.env.HOME = home;
+		try {
+			const settings = runtimeSkillSettings({ "skills.customDirectories": [path.join(home, "vendor-skills")] });
+			const discovery = await new SkillDiscoveryTool(createSession(cwd, { settings })).execute("call", {
+				query: "shared",
+			});
+			expect(discovery.details?.candidates).toEqual([
+				expect.objectContaining({ name: "shared-helper", description: "User copy" }),
+			]);
+		} finally {
+			if (originalHome === undefined) delete process.env.HOME;
+			else process.env.HOME = originalHome;
+		}
+	});
+
+	it("tells the model to consult skill_discovery only when runtime skills are installed", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-runtime-hint-"));
+		const workspaceTree = { rootPath: cwd, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] };
+		const bundled: Skill = {
+			name: "security-review",
+			description: "Bundled security review",
+			filePath: "embedded:skc/security-skills/security-review/SKILL.md",
+			baseDir: "embedded:skc/security-skills/security-review",
+			source: "bundled:security",
+		};
+		const runtime: Skill = {
+			name: "rust-testing",
+			description: "Rust testing patterns",
+			filePath: path.join(cwd, "vendor", "rust-testing", "SKILL.md"),
+			baseDir: path.join(cwd, "vendor", "rust-testing"),
+			source: "custom:user",
+		};
+		const render = async (skills: Skill[], toolNames: string[]) =>
+			(await buildSystemPrompt({ cwd, skills, toolNames, contextFiles: [], workspaceTree })).systemPrompt.join("\n");
+		const hint = "call `skill_discovery` once with one or two domain words";
+
+		expect(await render([bundled, runtime], ["read", "skill", "skill_discovery"])).toContain(hint);
+		expect(await render([bundled], ["read", "skill", "skill_discovery"])).not.toContain(hint);
+		expect(await render([{ ...runtime, hide: true }], ["read", "skill", "skill_discovery"])).not.toContain(hint);
+		expect(await render([bundled, runtime], ["read", "skill"])).not.toContain(hint);
+	});
+
 	it("explains empty results caused by disabled discovery scopes, and stays silent for genuine emptiness", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "skc-skills-notice-"));
 		await makeSkill(path.join(cwd, ".skc", "skills"), "project-helper", "Project helper skill");

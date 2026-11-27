@@ -16,6 +16,7 @@ import projectPromptTemplate from "./prompts/system/project-prompt.md" with { ty
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import volatileProjectContextTemplate from "./prompts/system/volatile-project-context.md" with { type: "text" };
 import { escapePromptMetadata } from "./session/messages";
+import { resolveSkcWorkflowId } from "./skill-state/canonical-skills";
 import { DEFAULT_ESSENTIAL_TOOL_NAMES } from "./tools";
 import { shortenPath } from "./tools/render-utils";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
@@ -446,6 +447,15 @@ export function buildVolatileProjectContext(options: BuildVolatileProjectContext
 		.trim();
 }
 
+/**
+ * A skill the user installed (project/user `.skc/skills` or `skills.customDirectories`),
+ * as opposed to the SKC-bundled skills the routing block already names. Only these
+ * are found through `skill_discovery`, so only they justify a discovery hint.
+ */
+function isRuntimeSkill(skill: Skill): boolean {
+	return !skill.source.startsWith("bundled:") && !skill.hide && resolveSkcWorkflowId(skill.name) === undefined;
+}
+
 /** Build the system prompt with tools, guidelines, and context */
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
 	if ($env.NULL_PROMPT === "true") {
@@ -471,6 +481,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		reasoningLanguage = "off",
 		workspaceTree: providedWorkspaceTree,
 		subagent = false,
+		skills = [],
 	} = options;
 	const resolvedCwd = cwd ?? getProjectDir();
 
@@ -670,6 +681,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		secretsEnabled,
 		reasoningLanguageEnglish: reasoningLanguage === "english",
 		subagent,
+		runtimeSkillDiscovery: toolNames.includes("skill_discovery") && skills.some(isRuntimeSkill),
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
 	const systemPrompt = [rendered];

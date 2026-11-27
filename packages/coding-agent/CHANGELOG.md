@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- The agent now finds installed skills on its own. When a session has skills from a project `.skc/skills` directory, your user skills directory, or `skills.customDirectories`, the system prompt tells the agent to call `skill_discovery` with a domain word (`rust testing`, `bun`) before language-, framework-, testing-, or tooling-specific work and to load a skill that fits. Sessions with only bundled skills get no extra prompt text.
+
+### Fixed
+
+- `skill_discovery` and the `skill` tool now search `skills.customDirectories`. Skills in those directories were in the session list, but discovery skipped them and reported nothing when `skills.enablePiUser` was off. They follow `skills.enabled`, `ignoredSkills`, `includeSkills`, and `disabledExtensions`, and a skill with the same name in a project or default user directory still wins.
+
 ## [0.7.27] - 2026-11-26
 
 - The composer no longer shows clickable Attach and Send buttons. Keyboard submission, `@` file completion, and clipboard paste are unchanged.
